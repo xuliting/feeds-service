@@ -270,7 +270,7 @@ static void launcher_cleanup(void)
     cleanup_screen();
 }
 
-static void signal_handler(int signum)
+static void sig_hdlr(int signum)
 {
     wprintw(tests_out_win, "Got signal: %d, force exit.\n", signum);
 
@@ -294,8 +294,8 @@ int launcher_main(int argc, char *argv[])
     char cmdbase[1024] = { 0 };
     char cmdline[1024];
 
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    signal(SIGINT, sig_hdlr);
+    signal(SIGTERM, sig_hdlr);
 
     init_screen();
 

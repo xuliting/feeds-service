@@ -20,33 +20,30 @@
  * SOFTWARE.
  */
 
-#ifndef __CONFIG_H__
-#define __CONFIG_H__
+#ifndef __CFG_H__
+#define __CFG_H__
 
 #include <ela_carrier.h>
-
-#define CARRIER_MAX_SERVER_URI_LEN 127
+#include <libconfig.h>
 
 typedef struct {
-    ElaOptions ela_options;
-    char *persistent_location;
-    int log2file;
+    config_t cfg;
+    ElaOptions ela_opts;
+    char *data_dir;
 
     struct {
-        int loglevel;
+        int log_lv;
     } tests;
 
     struct {
-        char host[CARRIER_MAX_SERVER_URI_LEN + 1];
-        char port[32];
-        int loglevel;
+        char *host;
+        char *port;
+        int log_lv;
     } robot;
 } TestConfig;
 
-extern TestConfig test_config;
+const char *get_cfg_file(const char *config_file, const char *default_config_files[]);
+TestConfig *load_cfg(const char *cfg_file, TestConfig *tc);
+void free_cfg(TestConfig *tc);
 
-TestConfig *load_config(const char *config_file);
-
-void free_config();
-
-#endif // __CONFIG_H__
+#endif // __CFG_H__

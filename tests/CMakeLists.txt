@@ -60,8 +60,7 @@ add_definitions(-DCRYSTAL_DYNAMIC)
 set(DEPS
     Elastos.NET.Carrier.Native.SDK
     libconfig
-    CUnit
-    cJSON)
+    CUnit)
 
 set(LIBS
     libelacarrier-shared
@@ -74,31 +73,37 @@ set(LIBS
 
 include_directories(
     .
-    ../src
     ${FEEDS_INT_DIST_DIR}/include)
 
 link_directories(
     ${FEEDS_INT_DIST_DIR}/lib)
 
-add_executable(feedstests
+add_executable(feeds_tests
+    EXCLUDE_FROM_ALL
     main.c
     launcher.c
     test.c
     robot.c
-    config.c
-    suites/feeds_suite/feeds_suite.c
+    cfg.c
+    suites/feeds_suite.c
     ../src/feeds_client/feeds_client.c
-    ../src/jsonrpc.c
-        ../src/carrier_cfg.c
     ../src/mkdirs.c)
 
-add_dependencies(feedstests ${DEPS})
-target_link_libraries(feedstests ${LIBS})
+add_dependencies(feeds_tests ${DEPS})
+set_target_properties(feeds_tests PROPERTIES OUTPUT_NAME ela-feeds-tests)
+target_link_libraries(feeds_tests ${LIBS})
 
-install(TARGETS feedstests
+add_custom_target(tests
+    DEPENDS feeds_tests)
+
+install(TARGETS feeds_tests
+    EXCLUDE_FROM_ALL
+    COMPONENT tests
     RUNTIME DESTINATION "bin"
     ARCHIVE DESTINATION "lib"
     LIBRARY DESTINATION "lib")
 
 install(FILES tests.conf
-    DESTINATION "etc/feeds")
+    EXCLUDE_FROM_ALL
+    COMPONENT tests
+    DESTINATION "etc/ela-feedsd")

@@ -98,24 +98,24 @@ set_target_properties(feeds_daemon PROPERTIES OUTPUT_NAME ela-feedsd)
 target_link_libraries(feeds_daemon ${LIBS})
 
 install(TARGETS feeds_daemon
+    COMPONENT core
     RUNTIME DESTINATION bin
     ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    COMPONENT core)
+    LIBRARY DESTINATION lib)
 
 install(FILES feedsd.conf
-    DESTINATION etc/ela-feedsd
-    COMPONENT core)
+    COMPONENT core
+    DESTINATION etc/ela-feedsd)
 
 if(CMAKE_SYSTEM_NAME STREQUAL Linux)
     install(FILES ${CMAKE_SOURCE_DIR}/scripts/ela-feedsd.service
-        DESTINATION lib/systemd/system
-        COMPONENT core)
+        COMPONENT core
+        DESTINATION lib/systemd/system)
 
     install(PROGRAMS ${CMAKE_SOURCE_DIR}/scripts/ela-feedsd.sh
+        COMPONENT core
         DESTINATION etc/init.d
-        RENAME ela-feedsd
-        COMPONENT core)
+        RENAME ela-feedsd)
 endif()
 
 set(SRC

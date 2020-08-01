@@ -37,12 +37,14 @@
 
 #include <crystal.h>
 
+#include "cfg.h"
+
 #define MODE_LAUNCHER   0
 #define MODE_CASES      1
 #define MODE_ROBOT      2
 
 static int mode = MODE_LAUNCHER;
-const char *config_file = NULL;
+const char *cfg_file = NULL;
 
 int test_main(int argc, char *argv[]);
 int robot_main(int argc, char *argv[]);
@@ -50,11 +52,11 @@ int launcher_main(int argc, char *argv[]);
 
 #define CONFIG_NAME "tests.conf"
 
-static const char *default_config_files[] = {
+static const char *default_cfg_files[] = {
     "./"CONFIG_NAME,
-    "../etc/feeds/"CONFIG_NAME,
-    "/usr/local/etc/feeds/"CONFIG_NAME,
-    "/etc/feeds/"CONFIG_NAME,
+    "../etc/ela-feedsd/"CONFIG_NAME,
+    "/usr/local/etc/ela-feedsd/"CONFIG_NAME,
+    "/etc/ela-feedsd/"CONFIG_NAME,
     NULL
 };
 
@@ -129,7 +131,7 @@ int main(int argc, char *argv[])
             break;
 
         case 'c':
-            config_file = optarg;
+            cfg_file = optarg;
             break;
 
         case 'h':
@@ -141,6 +143,13 @@ int main(int argc, char *argv[])
 
     if (debug)
         wait_for_debugger_attach();
+
+    cfg_file = get_cfg_file(cfg_file, default_cfg_files);
+    if (!cfg_file) {
+        fprintf(stderr, "Missing config file.\n");
+        usage();
+        return -1;
+    }
 
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);

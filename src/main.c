@@ -200,9 +200,9 @@ void usage(void)
 #define CONFIG_NAME "feeds.conf"
 static const char *default_cfg_files[] = {
     "./"CONFIG_NAME,
-    "../etc/feeds/"CONFIG_NAME,
-    "/usr/local/etc/feeds/"CONFIG_NAME,
-    "/etc/feeds/"CONFIG_NAME,
+    "../etc/ela-feedsd/"CONFIG_NAME,
+    "/usr/local/etc/ela-feedsd/"CONFIG_NAME,
+    "/etc/ela-feedsd/"CONFIG_NAME,
     NULL
 };
 
@@ -291,6 +291,8 @@ int transport_init(FeedsConfig *cfg)
         goto failure;
     }
 
+
+
     vlogI("Transport module initialized.");
 
     return 0;
@@ -314,6 +316,7 @@ int main(int argc, char *argv[])
     struct option options[] = {
         { "daemon",      no_argument,        NULL, 'd' },
         { "config",      required_argument,  NULL, 'c' },
+        { "resolver",    required_argument,  NULL, 'r' },
         { "debug",       no_argument,        NULL, 5 },
         { "help",        no_argument,        NULL, 'h' },
         { NULL,          0,                  NULL, 0 }
@@ -331,6 +334,10 @@ int main(int argc, char *argv[])
 
         case 'c':
             cfg_file = optarg;
+            break;
+
+        case 'r':
+            resolver = optarg;
             break;
 
         case 1:

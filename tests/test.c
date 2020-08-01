@@ -25,13 +25,13 @@
 
 #include <CUnit/Basic.h>
 
-#include "config.h"
+#include "cfg.h"
 #include "suites/suites.h"
 
-extern const char *config_file;
+extern const char *cfg_file;
 
 static
-void signal_handler(int signum)
+void sig_hdlr(int signum)
 {
     exit(-1);
 }
@@ -43,10 +43,10 @@ int test_main(int argc, char *argv[])
     int suites_cnt, cases_cnt, fail_cnt;
     int i, j;
 
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    signal(SIGINT, sig_hdlr);
+    signal(SIGTERM, sig_hdlr);
 
-    if (!load_config(config_file)) {
+    if (!load_cfg(cfg_file)) {
         fprintf(stderr, "Loading configure failed!\n");
         return -1;
     }

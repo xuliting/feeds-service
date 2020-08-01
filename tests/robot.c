@@ -30,24 +30,24 @@
 
 #include <crystal.h>
 
-#include "config.h"
+#include "cfg.h"
 #include "../src/mkdirs.h"
 
-extern const char *config_file;
+extern const char *cfg_file;
 
 static char publisher_node_id[ELA_MAX_ID_LEN + 1];
-static char robot_persistent_location[PATH_MAX];
-static char feeds_config[PATH_MAX];
+static char data_dir[PATH_MAX];
+static char feedsd_cfg_file[PATH_MAX];
 static SOCKET msg_sock = INVALID_SOCKET;
-static pid_t feeds_pid;
+static pid_t feedsd_pid;
+static TestConfig tc;
 
-int wait_test_case_connecting()
+int wait_cases_connecting(const char *host, const char *port)
 {
     int rc;
     SOCKET svr_sock;
 
-    svr_sock = socket_create(SOCK_STREAM, test_config.robot.host,
-                             test_config.robot.port);
+    svr_sock = socket_create(SOCK_STREAM, host, port);
     if (svr_sock == INVALID_SOCKET)
         return -1;
 
@@ -83,100 +83,105 @@ int get_publisher_node_id_from_test_case()
 }
 
 static
-int generate_feeds_config()
+int gen_feedsd_cfg(TestConfig *tc)
 {
-    int in_fd;
-    int out_fd;
-    int rc;
-    char buf[4096];
+    config_setting_t *root;
+    char path[PATH_MAX];
 
-    in_fd = open(config_file, O_RDONLY);
-    if (in_fd < 0)
-        return -1;
+    root = config_root_setting(&tc->cfg);
 
-    out_fd = open(feeds_config, O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
-    if (out_fd < 0) {
-        close(in_fd);
-        return -1;
-    }
+    config_setting_remove(root, "data-dir");
+    config_setting_remove(root, "tests");
+    config_setting_remove(root, "root");
 
-    while ((rc = read(in_fd, buf, sizeof(buf))) > 0) {
-        rc = write(out_fd, buf, rc);
-        if (rc < 0) {
-            close(in_fd);
-            close(out_fd);
-            remove(feeds_config);
+    {
+        config_setting_t *did;
+        config_setting_t *passwd;
+        config_setting_t *svr;
+        config_setting_t *ip;
+        config_setting_t *port;
+
+        did = config_setting_add(root, "did", CONFIG_TYPE_GROUP);
+        if (!did)
             return -1;
-        }
-    }
 
-    close(in_fd);
-    if (rc < 0) {
-        close(out_fd);
-        remove(feeds_config);
-        return -1;
-    }
-
-    rc = sprintf(buf, "\nlog-level = %d\n", test_config.robot.loglevel);
-    rc = write(out_fd, buf, rc);
-    if (rc < 0) {
-        close(out_fd);
-        remove(feeds_config);
-        return -1;
-    }
-
-    if (test_config.log2file) {
-        rc = sprintf(buf, "log-file = \"%s/feeds.log\"\n", robot_persistent_location);
-        rc = write(out_fd, buf, rc);
-        if (rc < 0) {
-            close(out_fd);
-            remove(feeds_config);
+        passwd = config_setting_add(did, "store-password", CONFIG_TYPE_STRING);
+        if (!passwd)
             return -1;
-        }
+        config_setting_set_string(passwd, "default");
+
+        svr = config_setting_add(did, "binding-server", CONFIG_TYPE_GROUP);
+        if (!svr)
+            return -1;
+
+        ip = config_setting_add(svr, "ip", CONFIG_TYPE_STRING);
+        if (!ip)
+            return -1;
+        config_setting_set_string(ip, "localhost");
+
+        port = config_setting_add(svr, "port", CONFIG_TYPE_INT);
+        if (!port)
+            return -1;
+        config_setting_set_int(ip, 8080);
     }
 
-    rc = sprintf(buf, "data-dir = \"%s\"\n", robot_persistent_location);
-    rc = write(out_fd, buf, rc);
-    if (rc < 0) {
-        close(out_fd);
-        remove(feeds_config);
-        return -1;
+    {
+        config_setting_t *log_lv;
+
+        log_lv = config_setting_add(root, "log-level", CONFIG_TYPE_INT);
+        if (!log_lv)
+            return -1;
+        config_setting_set_int(log_lv, tc->robot.log_lv);
     }
 
-    rc = sprintf(buf, "publishers = [\"%s\"]\n", publisher_node_id);
-    rc = write(out_fd, buf, rc);
-    close(out_fd);
-    if (rc < 0) {
-        remove(feeds_config);
-        return -1;
+    {
+        config_setting_t *log_file;
+
+        sprintf(path, "%s/feedsd.log", data_dir);
+
+        log_file = config_setting_add(root, "log-file", CONFIG_TYPE_STRING);
+        if (!log_file)
+            return -1;
+        config_setting_set_string(log_file, path);
     }
 
-    return 0;
+    {
+        config_setting_t *feedsd_data_dir;
+
+        feedsd_data_dir = config_setting_add(root, "data-dir", CONFIG_TYPE_STRING);
+        if (!feedsd_data_dir)
+            return -1;
+        config_setting_set_string(feedsd_data_dir, data_dir);
+    }
+
+    sprintf(path, "%s/feedsd.conf", data_dir);
+    return config_write_file(&tc->cfg, path) == CONFIG_TRUE ? 0 : -1;
 }
 
 static
-int notify_test_case_of_feeds_address()
+int pass_feedsd_addr_to_cases()
 {
-    char feeds_address[ELA_MAX_ADDRESS_LEN + 1];
+    char feedsd_addr[ELA_MAX_ADDRESS_LEN + 1];
     char fpath[PATH_MAX];
     int fd;
     int rc;
 
-    sleep(1);
+    memset(feedsd_addr, 0, sizeof(feedsd_addr));
+    sprintf(fpath, "%s/address.txt", data_dir);
 
-    memset(feeds_address, 0, sizeof(feeds_address));
+    while (access(fpath, F_OK))
+        sleep(1);
 
-    sprintf(fpath, "%s/address.txt", robot_persistent_location);
     fd = open(fpath, O_RDONLY);
     if (fd < 0)
         return -1;
 
-    rc = read(fd, feeds_address, sizeof(feeds_address) - 1);
+    rc = read(fd, feedsd_addr, sizeof(feedsd_addr) - 1);
     close(fd);
-    if (rc < 0 || !ela_address_is_valid(feeds_address))
+    if (rc < 0 || !ela_address_is_valid(feedsd_addr))
         return -1;
 
-    rc = send(msg_sock, feeds_address, strlen(feeds_address), 0);
+    rc = send(msg_sock, feedsd_addr, strlen(feedsd_addr), 0);
     if (rc < 0)
         return -1;
 
@@ -197,24 +202,28 @@ int wait_test_case_disconnected()
 static
 void cleanup()
 {
-    char dbpath[PATH_MAX];
+    char path[PATH_MAX];
 
     if (msg_sock != INVALID_SOCKET)
         socket_close(msg_sock);
 
-    if (feeds_pid > 0) {
-        kill(feeds_pid, SIGINT);
-        waitpid(feeds_pid, NULL, 0);
+    if (feedsd_pid > 0) {
+        kill(feedsd_pid, SIGINT);
+        waitpid(feedsd_pid, NULL, 0);
+        sprintf(path, "%s/db/feeds.sqlite3", data_dir);
+        remove(path);
+        sprintf(path, "%s/didstore", data_dir);
+        remove(path);
     }
 
-    free_config();
+    sprintf(path, "%s/feedsd.conf", data_dir);
+    remove(path);
 
-    sprintf(dbpath, "%s/feeds.sqlite3", robot_persistent_location);
-    remove(dbpath);
+    free_cfg(&tc);
 }
 
 static
-void signal_handler(int signum)
+void sig_hdlr(int signum)
 {
     cleanup();
     exit(-1);
@@ -225,66 +234,59 @@ int robot_main(int argc, char *argv[])
     char feeds_path[PATH_MAX];
     int rc;
 
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    signal(SIGINT, sig_hdlr);
+    signal(SIGTERM, sig_hdlr);
 
-    if (!load_config(config_file)) {
-        fprintf(stderr, "Loading configure failed!\n");
+    if (!load_cfg(cfg_file, &tc)) {
+        fprintf(stderr, "Loading config failed!\n");
         return -1;
     }
 
-    sprintf(robot_persistent_location, "%s/robot", test_config.persistent_location);
-    rc = mkdirs(robot_persistent_location, S_IRWXU);
+    sprintf(data_dir, "%s/robot", tc.data_dir);
+    rc = mkdirs(data_dir, S_IRWXU);
     if (rc < 0) {
-        fprintf(stderr, "mkdirs error!\n");
+        fprintf(stderr, "mkdirs [%s] failed!\n", tc.data_dir);
         goto cleanup;
     }
 
-    printf("waiting test case connection ...");
+    sprintf(feedsd_cfg_file, "%s/feedsd.conf", data_dir);
+    rc = gen_feedsd_cfg(&tc);
+    if (rc < 0) {
+        fprintf(stderr, "Generating feedsd config failed!\n");
+        goto cleanup;
+    }
+
+    printf("Starting service feeds ...");
     fflush(stdout);
-    rc = wait_test_case_connecting();
-    if (rc < 0) {
-        fprintf(stderr, "test case connection error!\n");
+    feedsd_pid = fork();
+    if (feedsd_pid < 0) {
+        fprintf(stderr, "failed!\n");
         goto cleanup;
-    }
-    printf("ok\n");
+    } else if (!feedsd_pid) {
+        char path[PATH_MAX];
 
-    printf("getting publisher's node id ...");
-    fflush(stdout);
-    rc = get_publisher_node_id_from_test_case();
-    if (rc < 0) {
-        fprintf(stderr, "get publisher node id error!\n");
-        goto cleanup;
-    }
-    printf("ok\n");
-
-    sprintf(feeds_config, "%s/feeds.conf", robot_persistent_location);
-    rc = generate_feeds_config();
-    if (rc < 0) {
-        fprintf(stderr, "generate feeds config error!\n");
-        goto cleanup;
-    }
-
-    printf("starting service feeds ...");
-    fflush(stdout);
-    feeds_pid = fork();
-    if (feeds_pid < 0) {
-        fprintf(stderr, "error starting feeds!\n");
-        goto cleanup;
-    } else if (!feeds_pid) {
-        close(STDOUT_FILENO);
-        close(STDERR_FILENO);
-        sprintf(feeds_path, "%s/svc_feeds", dirname(argv[0]));
-        execl(feeds_path, feeds_path, "-c", feeds_config, NULL);
+        strcpy(path, argv[0]);
+        sprintf(feeds_path, "%s/ela-feedsd", dirname(path));
+        execl(feeds_path, feeds_path, "-c", feedsd_cfg_file,
+              "-r", "http://api.elastos.io:21606", NULL);
         return -1;
     }
     printf("ok\n");
 
-    printf("notifying test case of feeds carrier address ...");
+    printf("Waiting test cases connection ...");
     fflush(stdout);
-    rc = notify_test_case_of_feeds_address();
+    rc = wait_cases_connecting(tc.robot.host, tc.robot.port);
+    if (rc < 0) {
+        fprintf(stderr, "failed!\n");
+        goto cleanup;
+    }
+    printf("ok\n");
+
+    printf("Passing feedsd carrier address to test cases ...");
+    fflush(stdout);
+    rc = pass_feedsd_addr_to_cases();
     if (rc) {
-        fprintf(stderr, "notify feeds address error!\n");
+        fprintf(stderr, "failed!\n");
         goto cleanup;
     }
     printf("ok\n");
@@ -296,4 +298,3 @@ cleanup:
 
     return rc;
 }
-

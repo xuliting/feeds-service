@@ -22,14 +22,14 @@
 
 #include <string.h>
 #include <limits.h>
-#include <libgen.h>
 #include <unistd.h>
 #include <fcntl.h>
 
-#include <libconfig.h>
 #include <crystal.h>
+#include <libconfig.h>
+#include <ela_carrier.h>
 
-#include "mkdirs.h"
+#include "../src/mkdirs.h"
 #include "cfg.h"
 
 const char *get_cfg_file(const char *config_file, const char *default_config_files[])
@@ -96,47 +96,46 @@ static void qualified_path(const char *path, const char *ref, char *qualified)
 }
 
 #define DEFAULT_LOG_LEVEL ElaLogLevel_Info
-#define DEFAULT_DATA_DIR  "/var/lib/ela-feedsd"
-FeedsConfig *load_cfg(const char *cfg_file, FeedsConfig *fc)
+#define DEFAULT_DATA_DIR  "~/.ela-feeds-tests"
+TestConfig *load_cfg(const char *cfg_file, TestConfig *tc)
 {
     config_setting_t *nodes_setting;
     config_setting_t *node_setting;
     char path[PATH_MAX];
     const char *stropt;
     char number[64];
-    config_t cfg;
     size_t *mem;
     int entries;
     int intopt;
     int rc;
     int i;
 
-    if (!cfg_file || !*cfg_file || !fc)
+    if (!cfg_file || !*cfg_file || !tc)
         return NULL;
 
-    memset(fc, 0, sizeof(FeedsConfig));
+    memset(tc, 0, sizeof(*tc));
 
-    config_init(&cfg);
+    config_init(&tc->cfg);
 
-    rc = config_read_file(&cfg, cfg_file);
+    rc = config_read_file(&tc->cfg, cfg_file);
     if (!rc) {
-        fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
-                config_error_line(&cfg), config_error_text(&cfg));
-        config_destroy(&cfg);
+        fprintf(stderr, "%s:%d - %s\n", config_error_file(&tc->cfg),
+                config_error_line(&tc->cfg), config_error_text(&tc->cfg));
+        free_cfg(tc);
         return NULL;
     }
 
-    nodes_setting = config_lookup(&cfg, "carrier.bootstraps");
+    nodes_setting = config_lookup(&tc->cfg, "carrier.bootstraps");
     if (!nodes_setting) {
         fprintf(stderr, "Missing bootstraps section.\n");
-        config_destroy(&cfg);
+        free_cfg(tc);
         return NULL;
     }
 
     entries = config_setting_length(nodes_setting);
     if (entries <= 0) {
         fprintf(stderr, "Empty bootstraps option.\n");
-        config_destroy(&cfg);
+        free_cfg(tc);
         return NULL;
     }
 
@@ -144,16 +143,16 @@ FeedsConfig *load_cfg(const char *cfg_file, FeedsConfig *fc)
                               sizeof(BootstrapNode) * entries, bootstraps_dtor);
     if (!mem) {
         fprintf(stderr, "Load configuration failed, out of memory.\n");
-        config_destroy(&cfg);
+        free_cfg(tc);
         return NULL;
     }
 
     *mem = entries;
-    fc->carrier_opts.bootstraps_size = entries;
-    fc->carrier_opts.bootstraps = (BootstrapNode *)(++mem);
+    tc->ela_opts.bootstraps_size = entries;
+    tc->ela_opts.bootstraps = (BootstrapNode *)(++mem);
 
     for (i = 0; i < entries; i++) {
-        BootstrapNode *node = fc->carrier_opts.bootstraps + i;
+        BootstrapNode *node = tc->ela_opts.bootstraps + i;
 
         node_setting = config_setting_get_elem(nodes_setting, i);
 
@@ -183,132 +182,78 @@ FeedsConfig *load_cfg(const char *cfg_file, FeedsConfig *fc)
             node->public_key = NULL;
     }
 
-    fc->carrier_opts.udp_enabled = true;
-    rc = config_lookup_bool(&cfg, "carrier.udp-enabled", &intopt);
+    tc->ela_opts.udp_enabled = true;
+    rc = config_lookup_bool(&tc->cfg, "carrier.udp-enabled", &intopt);
     if (rc)
-        fc->carrier_opts.udp_enabled = !!intopt;
+        tc->ela_opts.udp_enabled = !!intopt;
 
-    fc->carrier_opts.log_level = DEFAULT_LOG_LEVEL;
-    rc = config_lookup_int(&cfg, "log-level", &intopt);
-    if (rc)
-        fc->carrier_opts.log_level = intopt;
-
-    rc = config_lookup_string(&cfg, "log-file", &stropt);
-    if (rc && *stropt) {
-        qualified_path(stropt, cfg_file, path);
-        fc->carrier_opts.log_file = strdup(path);
-    }
-
-    rc = config_lookup_string(&cfg, "data-dir", &stropt);
+    rc = config_lookup_string(&tc->cfg, "data-dir", &stropt);
     if (!rc || !*stropt)
         stropt = DEFAULT_DATA_DIR;
     qualified_path(stropt, cfg_file, path);
-    fc->data_dir = strdup(path);
-
-    sprintf(path, "%s/carrier", fc->data_dir);
-    fc->carrier_opts.persistent_location = strdup(path);
-    if (!fc->carrier_opts.persistent_location ||
-        mkdirs(fc->carrier_opts.persistent_location, S_IRWXU) < 0) {
-        fprintf(stderr, "Making carrier dir[%s] failed.\n", fc->carrier_opts.persistent_location);
-        config_destroy(&cfg);
-        free_cfg(fc);
+    tc->data_dir = strdup(path);
+    if (!tc->data_dir || mkdirs(tc->data_dir, S_IRWXU) < 0) {
+        fprintf(stderr, "Making data dir[%s] failed.\n", tc->data_dir);
+        free_cfg(tc);
         return NULL;
     }
 
-    sprintf(path, "%s/didcache", fc->data_dir);
-    fc->didcache_dir = strdup(path);
-    if (!fc->didcache_dir || mkdirs(fc->didcache_dir, S_IRWXU) < 0) {
-        fprintf(stderr, "Making did cache dir[%s] failed.\n", fc->didcache_dir);
-        config_destroy(&cfg);
-        free_cfg(fc);
+    tc->tests.log_lv = DEFAULT_LOG_LEVEL;
+    rc = config_lookup_int(&tc->cfg, "tests.log-level", &intopt);
+    if (rc)
+        tc->tests.log_lv = intopt;
+
+    rc = config_lookup_string(&tc->cfg, "robot.host", &stropt);
+    if (!rc || !(tc->robot.host = *stropt ? strdup(stropt) : "localhost")) {
+        fprintf(stderr, "Missing robot.host entry.\n");
+        free_cfg(tc);
         return NULL;
     }
 
-    sprintf(path, "%s/didstore", fc->data_dir);
-    fc->didstore_dir = strdup(path);
-    if (!fc->didstore_dir || mkdirs(fc->didstore_dir, S_IRWXU) < 0) {
-        fprintf(stderr, "Making did store dir[%s] failed.\n", fc->didstore_dir);
-        config_destroy(&cfg);
-        free_cfg(fc);
-        return NULL;
-    }
-
-    sprintf(path, "%s/db/feeds.sqlite3", fc->data_dir);
-    fc->db_fpath = strdup(path);
-    strcpy(path, fc->db_fpath);
-    if (!fc->db_fpath || mkdirs(dirname(path), S_IRWXU) < 0) {
-        fprintf(stderr, "Making db dir[%s] failed.\n", path);
-        config_destroy(&cfg);
-        free_cfg(fc);
-        return NULL;
-    }
-
-    rc = config_lookup_string(&cfg, "did.store-password", &stropt);
-    if (!rc || !*stropt || !(fc->didstore_passwd = strdup(stropt))) {
-        fprintf(stderr, "Missing did.store-password entry.\n");
-        config_destroy(&cfg);
-        free_cfg(fc);
-        return NULL;
-    }
-
-    rc = config_lookup_string(&cfg, "did.binding-server.ip", &stropt);
-    if (!rc || !*stropt || !(fc->http_ip = strdup(stropt))) {
-        fprintf(stderr, "Missing did.binding-server.ip entry.\n");
-        config_destroy(&cfg);
-        free_cfg(fc);
-        return NULL;
-    }
-
-    rc = config_lookup_int(&cfg, "did.binding-server.port", &intopt);
+    intopt = 7238;
+    rc = config_lookup_int(&tc->cfg, "robot.port", &intopt);
     if (!rc || (intopt <= 0 || intopt > 65535)) {
-        fprintf(stderr, "Missing did.binding-server.port entry.\n");
-        config_destroy(&cfg);
-        free_cfg(fc);
+        fprintf(stderr, "Missing robot.port entry.\n");
+        free_cfg(tc);
         return NULL;
     }
     sprintf(number, "%d", intopt);
-    fc->http_port = strdup(number);
+    tc->robot.port = strdup(number);
 
-    config_destroy(&cfg);
-    return fc;
+    tc->tests.log_lv = DEFAULT_LOG_LEVEL;
+    rc = config_lookup_int(&tc->cfg, "tests.log-level", &intopt);
+    if (rc)
+        tc->robot.log_lv = intopt;
+
+    return tc;
 }
 
-void free_cfg(FeedsConfig *fc)
+void free_cfg(TestConfig *tc)
 {
-    if (fc->carrier_opts.persistent_location)
-        free((void *)fc->carrier_opts.persistent_location);
+    config_destroy(&tc->cfg);
 
-    if (fc->carrier_opts.log_file)
-        free((void *)fc->carrier_opts.log_file);
+    if (tc->ela_opts.persistent_location)
+        free((void *)tc->ela_opts.persistent_location);
 
-    if (fc->carrier_opts.bootstraps) {
-        size_t *p = (size_t *)fc->carrier_opts.bootstraps;
+    if (tc->ela_opts.log_file)
+        free((void *)tc->ela_opts.log_file);
+
+    if (tc->ela_opts.bootstraps) {
+        size_t *p = (size_t *)tc->ela_opts.bootstraps;
         deref(--p);
     }
 
-    if (fc->carrier_opts.express_nodes) {
-        size_t *p = (size_t *)fc->carrier_opts.express_nodes;
+    if (tc->ela_opts.express_nodes) {
+        size_t *p = (size_t *)tc->ela_opts.express_nodes;
         deref(--p);
     }
 
-    if (fc->data_dir)
-        free(fc->data_dir);
+    if (tc->data_dir)
+        free(tc->data_dir);
 
-    if (fc->didcache_dir)
-        free(fc->didcache_dir);
+    if (tc->robot.host)
+        free(tc->robot.host);
 
-    if (fc->didstore_dir)
-        free(fc->didstore_dir);
-
-    if (fc->db_fpath)
-        free(fc->db_fpath);
-
-    if (fc->didstore_passwd)
-        free(fc->didstore_passwd);
-
-    if (fc->http_ip)
-        free(fc->http_ip);
-
-    if (fc->http_port)
-        free(fc->http_port);
+    if (tc->robot.port)
+        free(tc->robot.port);
 }
