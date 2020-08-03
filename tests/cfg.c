@@ -29,7 +29,7 @@
 #include <libconfig.h>
 #include <ela_carrier.h>
 
-#include "../src/mkdirs.h"
+#include "mkdirs.h"
 #include "cfg.h"
 
 TestConfig tc;

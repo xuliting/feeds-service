@@ -23,8 +23,8 @@
 #ifndef __FEEDS_SUITE_H__
 #define __FEEDS_SUITE_H__
 
-#include "../suite.h"
-#include "../case.h"
+#include "suite.h"
+#include "case.h"
 
 DECL_TESTSUITE(feeds)
 #define DEFINE_FEEDS_TESTSUITE DEFINE_TESTSUITE(feeds)

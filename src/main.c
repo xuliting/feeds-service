@@ -283,9 +283,9 @@ int transport_init(FeedsConfig *cfg)
 
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.idle = idle_callback;
-    callbacks.friend_connection = friend_conn_cb;
+    callbacks.friend_connection = friend_connection_callback;
     callbacks.friend_request = friend_request_callback;
-    callbacks.friend_message = on_msg;
+    callbacks.friend_message = on_receiving_message;
 
     DIDBackend_InitializeDefault(resolver, cfg->didcache_dir);
 

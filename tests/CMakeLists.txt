@@ -58,8 +58,9 @@ set(SRC
     robot.c
     cfg.c
     suites/feeds_suite.c
+    ../src/rpc.c
+    ../src/err.c
     ../src/feeds_client/feeds_client.c
-        ../src/feeds_client/tsx.c
     ../src/mkdirs.c)
 
 add_definitions(-DLIBCONFIG_STATIC)
@@ -67,13 +68,16 @@ add_definitions(-DCRYSTAL_DYNAMIC)
 
 set(DEPS
     Elastos.NET.Carrier.Native.SDK
+    Elastos.DID.Native.SDK
     libconfig
+    msgpack-c
     CUnit)
 
 set(LIBS
     libelacarrier-shared
     libcrystal-shared
-    cjson
+    libeladid-shared
+    msgpackc
     cunit
     config
     ncurses
@@ -82,6 +86,7 @@ set(LIBS
 include_directories(
     .
     suites
+    ../src
     ../src/feeds_client
     ${FEEDS_INT_DIST_DIR}/include)
 
@@ -110,3 +115,10 @@ install(FILES tests.conf
     EXCLUDE_FROM_ALL
     COMPONENT tests
     DESTINATION "etc/ela-feedsd")
+
+add_custom_target(install_tests
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMPONENT=tests
+        -P ${CMAKE_BINARY_DIR}/cmake_install.cmake
+    DEPENDS tests)
+

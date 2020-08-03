@@ -27,11 +27,6 @@
 #include <pthread.h>
 
 #include <crystal.h>
-#if defined(_WIN32) || defined(_WIN64)
-
-// Undefine Windows defined MOUSE_MOVED for PDCurses
-#undef MOUSE_MOVED
-#endif
 #include <curses.h>
 
 subprocess_t tests;

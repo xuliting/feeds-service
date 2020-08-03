@@ -31,7 +31,7 @@
 #include <crystal.h>
 
 #include "cfg.h"
-#include "../src/mkdirs.h"
+#include "mkdirs.h"
 
 extern const char *cfg_file;
 

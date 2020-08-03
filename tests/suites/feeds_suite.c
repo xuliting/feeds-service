@@ -29,7 +29,7 @@
 #include <cfg.h>
 
 #include "case.h"
-#include "../../../src/feeds_client/feeds_client.h"
+#include "feeds_client.h"
 
 typedef struct {
     FeedsClient *fc;

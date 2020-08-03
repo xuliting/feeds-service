@@ -26,7 +26,7 @@
 #include <CUnit/Basic.h>
 
 #include "cfg.h"
-#include "suites/suites.h"
+#include "suites.h"
 
 extern const char *cfg_file;
 
