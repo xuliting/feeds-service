@@ -206,21 +206,29 @@ TestConfig *load_cfg(const char *cfg_file)
         tc.tests.log_lv = intopt;
 
     rc = config_lookup_string(&tc.cfg, "robot.host", &stropt);
-    if (!rc || !(tc.robot.host = *stropt ? strdup(stropt) : "localhost")) {
-        fprintf(stderr, "Missing robot.host entry.\n");
+    if (!rc || !*stropt)
+        stropt = "localhost";
+    tc.robot.host = strdup(stropt);
+    if (!tc.robot.host) {
+        fprintf(stderr, "Setting robot.host entry failed.\n");
         free_cfg();
         return NULL;
     }
 
     intopt = 7238;
     rc = config_lookup_int(&tc.cfg, "robot.port", &intopt);
-    if (!rc || (intopt <= 0 || intopt > 65535)) {
-        fprintf(stderr, "Missing robot.port entry.\n");
+    if (rc && (intopt <= 0 || intopt > 65535)) {
+        fprintf(stderr, "Wrong robot.port entry.\n");
         free_cfg();
         return NULL;
     }
     sprintf(number, "%d", intopt);
     tc.robot.port = strdup(number);
+    if (!tc.robot.port) {
+        fprintf(stderr, "Setting robot.port entry failed.\n");
+        free_cfg();
+        return NULL;
+    }
 
     tc.tests.log_lv = DEFAULT_LOG_LEVEL;
     rc = config_lookup_int(&tc.cfg, "tests.log-level", &intopt);

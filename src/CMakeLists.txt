@@ -135,7 +135,7 @@ set(FEEDSCLI_DEPENDS
 
 set(LIBS
     config
-    mswgpackc
+    msgpackc
     libcrystal-shared
     libelacarrier-shared
     libeladid-shared

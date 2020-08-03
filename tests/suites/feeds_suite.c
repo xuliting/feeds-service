@@ -76,15 +76,17 @@ CU_TestInfo* feeds_get_cases()
 
 void *tfc_routine(void *arg)
 {
-    feeds_client_run((FeedsClient *)arg, 10);
+    feeds_client_run(arg, 10);
     return NULL;
 }
 
 static
 void tfc_deinit(TestsFeedsClient *tfc)
 {
-    feeds_client_kill(tfc->fc);
-    pthread_join(tfc->tid, NULL);
+    if (tfc->fc) {
+        feeds_client_kill(tfc->fc);
+        pthread_join(tfc->tid, NULL);
+    }
 }
 
 static

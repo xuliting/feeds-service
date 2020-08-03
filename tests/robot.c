@@ -82,16 +82,16 @@ int get_publisher_node_id_from_test_case()
 }
 
 static
-int gen_feedsd_cfg(TestConfig *tc)
+int gen_feedsd_cfg()
 {
     config_setting_t *root;
     char path[PATH_MAX];
 
-    root = config_root_setting(&tc->cfg);
+    root = config_root_setting(&tc.cfg);
 
     config_setting_remove(root, "data-dir");
     config_setting_remove(root, "tests");
-    config_setting_remove(root, "root");
+    config_setting_remove(root, "robot");
 
     {
         config_setting_t *did;
@@ -121,7 +121,7 @@ int gen_feedsd_cfg(TestConfig *tc)
         port = config_setting_add(svr, "port", CONFIG_TYPE_INT);
         if (!port)
             return -1;
-        config_setting_set_int(ip, 8080);
+        config_setting_set_int(port, 8080);
     }
 
     {
@@ -130,7 +130,7 @@ int gen_feedsd_cfg(TestConfig *tc)
         log_lv = config_setting_add(root, "log-level", CONFIG_TYPE_INT);
         if (!log_lv)
             return -1;
-        config_setting_set_int(log_lv, tc->robot.log_lv);
+        config_setting_set_int(log_lv, tc.robot.log_lv);
     }
 
     {
@@ -154,7 +154,7 @@ int gen_feedsd_cfg(TestConfig *tc)
     }
 
     sprintf(path, "%s/feedsd.conf", data_dir);
-    return config_write_file(&tc->cfg, path) == CONFIG_TRUE ? 0 : -1;
+    return config_write_file(&tc.cfg, path) == CONFIG_TRUE ? 0 : -1;
 }
 
 static
@@ -235,6 +235,7 @@ int robot_main(int argc, char *argv[])
 
     signal(SIGINT, sig_hdlr);
     signal(SIGTERM, sig_hdlr);
+    signal(SIGCHLD, sig_hdlr);
 
     if (!load_cfg(cfg_file)) {
         fprintf(stderr, "Loading config failed!\n");
@@ -249,7 +250,7 @@ int robot_main(int argc, char *argv[])
     }
 
     sprintf(feedsd_cfg_file, "%s/feedsd.conf", data_dir);
-    rc = gen_feedsd_cfg(&tc);
+    rc = gen_feedsd_cfg();
     if (rc < 0) {
         fprintf(stderr, "Generating feedsd config failed!\n");
         goto cleanup;

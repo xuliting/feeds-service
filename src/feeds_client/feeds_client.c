@@ -278,7 +278,7 @@ FeedsClient *feeds_client_create(FeedsClientOpts *opts)
     } else if (opts->did.mnemo && *opts->did.mnemo) {
         char mnemo[ELA_MAX_MNEMONIC_LEN + 1];
 
-        if (DIDStore_ExportMnemonic(fc->store, opts->did.passwd, mnemo, sizeof(mnemo)))
+        if (DIDStore_ExportMnemonic(fc->store, opts->did.passwd, mnemo, sizeof(mnemo)) < 0)
             goto failure;
 
         if (strcmp(mnemo, opts->did.mnemo))
@@ -347,12 +347,14 @@ finally:
 
 void feeds_client_kill(FeedsClient *fc)
 {
-    ela_kill(fc->carrier);
     deref(fc);
 }
 
 int feeds_client_run(FeedsClient *fc, int interval)
 {
+    if (!fc || !fc->carrier)
+        return -1;
+
     return ela_run(fc->carrier, interval);
 }
 
@@ -376,10 +378,10 @@ Transaction *tsx_create(const Transaction *in)
 
     tsx->addr           = strcpy(tsx->buf, in->addr);
     tsx->tsx_id         = in->tsx_id;
-    tsx->unmarshal_resp = tsx->unmarshal_resp;
-    tsx->hdl_multi_resp = tsx->hdl_multi_resp;
-    tsx->user_cb        = tsx->user_cb;
-    tsx->user_data      = tsx->user_data;
+    tsx->unmarshal_resp = in->unmarshal_resp;
+    tsx->hdl_multi_resp = in->hdl_multi_resp;
+    tsx->user_cb        = in->user_cb;
+    tsx->user_data      = in->user_data;
 
     tsx->le.data        = tsx;
     ela_get_id_by_address(in->addr, tsx->node_id, sizeof(tsx->node_id));
