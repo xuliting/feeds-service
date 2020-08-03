@@ -52,13 +52,13 @@ typedef struct {
 typedef struct FeedsClient FeedsClient;
 
 FeedsClient *feeds_client_create(FeedsClientOpts *opts);
-void feeds_client_delete(FeedsClient *fc);
 int feeds_client_run(FeedsClient *fc, int interval);
 int feeds_client_decl_owner(FeedsClient *fc, const char *addr, DeclOwnerResp **resp, ErrResp **err);
 int feeds_client_decl_owner_async(FeedsClient *fc, const char *addr,
                                   void (*cb)(DeclOwnerResp *, ErrResp *, void *),
-                                  void *ctx);
-int feeds_client_imp_did(FeedsClient *fc, const char *svc_node_id, ImpDIDResp **resp, ErrResp **err);
+                                  void *user_data);
+void feeds_client_kill(FeedsClient *fc);
+/*int feeds_client_imp_did(FeedsClient *fc, const char *svc_node_id, ImpDIDResp **resp, ErrResp **err);
 int feeds_client_iss_vc(FeedsClient *fc, const char *svc_node_id, const char *sub, IssVCResp **resp, ErrResp **err);
 int feeds_client_signin1(FeedsClient *fc, const char *svc_node_id, SigninReqChalResp **resp, ErrResp **err);
 int feeds_client_signin2(FeedsClient *fc, const char *svc_node_id,
@@ -101,6 +101,6 @@ int feeds_client_subscribe_channel(FeedsClient *fc, const char *svc_node_id, uin
 int feeds_client_unsubscribe_channel(FeedsClient *fc, const char *svc_node_id, uint64_t id,
                                      UnsubChanResp **resp, ErrResp **err);
 int feeds_client_enable_notification(FeedsClient *fc, const char *svc_node_id,
-                                     EnblNotifResp **resp, ErrResp **err);
+                                     EnblNotifResp **resp, ErrResp **err);*/
 
 #endif // __FEEDS_CLIENT_H__

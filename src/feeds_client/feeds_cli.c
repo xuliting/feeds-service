@@ -1270,6 +1270,6 @@ read_cmd:
             do_cmd(cmd);
     } while (state != STOP);
 
-    feeds_client_delete(fc);
+    feeds_client_kill(fc);
     return 0;
 }
