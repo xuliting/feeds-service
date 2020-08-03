@@ -22,14 +22,16 @@
 
 #include <string.h>
 #include <pthread.h>
+#include <limits.h>
+
 #include <crystal.h>
 #include <ela_did.h>
 #include <ela_jwt.h>
 
 #include "feeds_client.h"
-#include "cfg.h"
+#include "mkdirs.h"
 
-static const char *resolver = "http://api.elastos.io:20606";
+static const char *resolver = "http://api.elastos.io:21606";
 const char *mnemonic = "advance duty suspect finish space matter squeeze elephant twenty over stick shield";
 
 struct FeedsClient {
@@ -45,27 +47,120 @@ struct FeedsClient {
     void *resp;
     ErrResp *err;
     void *unmarshal;
+    struct {
+        list_t *not_friend;
+        list_t *peer_offline;
+        list_t *ongoing;
+    } tsx;
+    char buf[0];
 };
 
+typedef struct Transaction Transaction;
+struct Transaction {
+    list_entry_t le;
+    const char *addr;
+    char node_id[ELA_MAX_ID_LEN + 1];
+    uint64_t tsx_id;
+    const Req *req;
+    Resp *resp;
+    Marshalled *(*marshal)(const Req *);
+    Marshalled *marshalled;
+    int (*unmarshal)(Resp **, ErrResp **);
+    bool (*resp_hdlr)(Transaction *, Resp *, ErrResp *);
+    void (*user_cb)(Resp **, ErrResp **, void *);
+    void *user_data;
+    char buf[0];
+};
+
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    bool fin;
+    void *resp;
+    void *err;
+} SyncAPI;
+
+#define list_foreach(list, entry)                    \
+    for (list_iterate((list), &it);                  \
+         list_iterator_next(&it, (void **)&(entry)); \
+         deref((entry)))
+
 static
-void connection_callback(ElaCarrier *w, ElaConnectionStatus status, void *context)
+void on_conn(ElaCarrier *w, ElaConnectionStatus status, void *context)
 {
     FeedsClient *fc = (FeedsClient *)context;
 
-    pthread_mutex_lock(&fc->lock);
-    pthread_mutex_unlock(&fc->lock);
-    pthread_cond_signal(&fc->cond);
+    if (status == ElaConnectionStatus_Connected) {
+        Transaction *tsx;
+        int rc;
+
+        pthread_mutex_lock(&fc->lock);
+        for (; !list_is_empty(fc->tsx.not_friend); deref(tsx)) {
+            tsx = list_pop_head(fc->tsx.not_friend);
+
+            rc = ela_add_friend(fc->carrier, tsx->addr, "hello");
+            if (rc < 0) {
+                tsx->user_cb(NULL, NULL, tsx->user_data);
+                continue;
+            }
+
+            list_push_tail(fc->tsx.peer_offline, &tsx->le);
+        }
+        pthread_mutex_unlock(&fc->lock);
+    }
 }
 
 static
-void friend_connection_callback(ElaCarrier *w, const char *friendid,
-                                ElaConnectionStatus status, void *context)
+void on_friend_conn(ElaCarrier *w, const char *friendid,
+                    ElaConnectionStatus status, void *context)
 {
     FeedsClient *fc = (FeedsClient *)context;
+    list_iterator_t it;
+    Transaction *tsx;
+    int rc;
 
     pthread_mutex_lock(&fc->lock);
+
+    if (status == ElaConnectionStatus_Connected) {
+
+        list_foreach(fc->tsx.peer_offline, tsx) {
+            if (strcmp(tsx->node_id, friendid))
+                continue;
+
+            list_iterator_remove(&it);
+
+            rc = ela_send_friend_message(fc->carrier, tsx->node_id,
+                                         tsx->marshalled->data, tsx->marshalled->sz, NULL);
+            if (rc < 0) {
+                tsx->user_cb(NULL, NULL, tsx->user_data);
+                continue;
+            }
+
+            list_push_tail(fc->tsx.ongoing, &tsx->le);
+        }
+
+        list_foreach(fc->tsx.ongoing, tsx) {
+            if (strcmp(tsx->node_id, friendid))
+                continue;
+
+            rc = ela_send_friend_message(fc->carrier, tsx->node_id, tsx->marshalled->data,
+                                         tsx->marshalled->sz, NULL);
+            if (rc < 0) {
+                list_iterator_remove(&it);
+                tsx->user_cb(NULL, NULL, tsx->user_data);
+            }
+        }
+    } else {
+        list_foreach(fc->tsx.ongoing, tsx) {
+            if (strcmp(tsx->node_id, friendid))
+                continue;
+
+            deref(tsx->resp);
+            tsx->resp = NULL;
+        }
+    }
+
     pthread_mutex_unlock(&fc->lock);
-    pthread_cond_signal(&fc->cond);
 }
 
 static
@@ -80,9 +175,9 @@ void console(const char *fmt, ...)
 }
 
 static
-void on_receiving_message(ElaCarrier *carrier, const char *from,
-                          const void *msg, size_t len, int64_t timestamp,
-                          bool offline, void *context)
+void on_msg(ElaCarrier *carrier, const char *from,
+            const void *msg, size_t len, int64_t timestamp,
+            bool offline, void *context)
 {
     FeedsClient *fc = (FeedsClient *)context;
     int (*unmarshal)(void **, ErrResp **) = fc->unmarshal;
@@ -93,6 +188,35 @@ void on_receiving_message(ElaCarrier *carrier, const char *from,
     rc = rpc_unmarshal_notif_or_resp_id(msg, len, &notif, &id);
     if (rc < 0)
         return;
+
+    if (!notif) {
+        list_iterator_t it;
+        Transaction *tsx;
+
+        pthread_mutex_lock(&fc->lock);
+
+        list_foreach(fc->tsx.ongoing, tsx) {
+            Resp *resp;
+            ErrResp *err;
+
+            if (tsx->tsx_id != id)
+                continue;
+
+            rc = tsx->unmarshal(&resp, &err);
+            if (rc < 0) {
+                list_iterator_remove(&it);
+                tsx->user_cb(NULL, NULL, tsx->user_data);
+                continue;
+            }
+
+            if (tsx->resp_hdlr && !tsx->resp_hdlr(tsx, resp, err))
+                continue;
+
+
+        }
+
+        pthread_mutex_unlock(&fc->lock);
+    }
 
     if (notif) {
         if (!strcmp(notif->method, "new_post")) {
@@ -148,7 +272,7 @@ void *carrier_routine(void *arg)
 }
 
 static
-void feeds_client_destructor(void *obj)
+void feeds_client_dtor(void *obj)
 {
     FeedsClient *fc = (FeedsClient *)obj;
 
@@ -193,60 +317,97 @@ DIDDocument* merge_to_localcopy(DIDDocument *chaincopy, DIDDocument *localcopy)
     return localcopy;
 }
 
-FeedsClient *feeds_client_create(FeedsCLIConfig *opts)
+FeedsClient *feeds_client_create(FeedsClientOpts *opts)
 {
     DIDAdapter adapter = {
         .createIdTransaction = create_id_tsx
     };
-    ElaCallbacks callbacks;
+    ElaCallbacks ela_cbs;
+    char path[PATH_MAX];
+    DIDDocument *doc;
     FeedsClient *fc;
+    DID *did;
     int rc;
 
-    DIDBackend_InitializeDefault(resolver, opts->didcache_dir);
+    if (!opts->data_dir || !*opts->data_dir || !opts->log_file || !*opts->log_file ||
+        !opts->carrier.bootstraps_sz || !opts->carrier.bootstraps || !opts->did.passwd ||
+        !*opts->did.passwd)
+        return NULL;
 
-    memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.connection_status = connection_callback;
-    callbacks.friend_connection = friend_connection_callback;
-    callbacks.friend_message = on_receiving_message;
-
-    fc = rc_zalloc(sizeof(FeedsClient), feeds_client_destructor);
+    fc = rc_zalloc(sizeof(FeedsClient) + strlen(opts->did.passwd) + 1, feeds_client_dtor);
     if (!fc)
         return NULL;
 
-    fc->store = DIDStore_Open(opts->didstore_dir, &adapter);
+    sprintf(path, "%s/didcache", opts->data_dir);
+    rc = mkdirs(path, S_IRWXU);
+    if (rc < 0)
+        return NULL;
+    DIDBackend_InitializeDefault(resolver, path);
+
+    sprintf(path, "%s/didstore", opts->data_dir);
+    fc->store = DIDStore_Open(path, &adapter);
     if (!fc->store) {
         deref(fc);
         return NULL;
     }
 
     if (!DIDStore_ContainsPrivateIdentity(fc->store)) {
-        //DIDDocument *doc;
-        //DID *did;
-        DIDStore_InitPrivateIdentity(fc->store, opts->didstore_passwd, mnemonic, "secret", "english", true);
-        //for (int i = 0; i < 24; ++i) {
-        //    char did[ELA_MAX_DID_LEN];
-        //    DIDDocument *doc;
-        //    doc = DIDStore_NewDIDByIndex(fc->store, opts->didstore_passwd, i, NULL);
-        //    printf("%d. %s\n", i, DID_ToString(DIDDocument_GetSubject(doc), did, sizeof(did)));
-        //    DIDDocument_Destroy(doc);
-        //}
-        //doc = DIDStore_NewDIDByIndex(fc->store, opts->didstore_passwd, 0, NULL);
+        if (!opts->did.mnemo || !*opts->did.mnemo) {
+            deref(fc);
+            return NULL;
+        }
 
-        //did = DID_FromString("did:elastos:ijUnD4KeRpeBUFmcEDCbhxMTJRzUYCQCZM");
-        DIDStore_Synchronize(fc->store, opts->didstore_passwd, merge_to_localcopy);
-        //doc = DID_Resolve(did, true);
-        //DIDStore_StoreDID(fc->store, doc, NULL);
-        //DIDDocument_Destroy(doc);
-        //DID_Destroy(did);
+        if (DIDStore_InitPrivateIdentity(fc->store, opts->did.passwd, opts->did.mnemo,
+                                         opts->did.passphrase, "english", true)) {
+            deref(fc);
+            return NULL;
+        }
+    } else if (opts->did.mnemo && *opts->did.mnemo) {
+        char mnemo[ELA_MAX_MNEMONIC_LEN + 1];
+
+        if (DIDStore_ExportMnemonic(fc->store, opts->did.passwd, mnemo, sizeof(mnemo))) {
+            deref(fc);
+            return NULL;
+        }
+
+        if (strcmp(mnemo, opts->did.mnemo)) {
+            deref(fc);
+            return NULL;
+        }
     }
 
-    strcpy(fc->did, "did:elastos:ieaA5VMWydQmVJtM5daW5hoTQpcuV38mHM");
-    fc->passwd = strdup(opts->didstore_passwd);
+    if (!(did = DIDStore_GetDIDByIndex(fc->store, opts->did.idx))) {
+        deref(fc);
+        return NULL;
+    }
+
+    DID_ToString(did, fc->did, sizeof(fc->did));
+    fc->passwd = strcpy(fc->buf, opts->did.passwd);
+
+    doc = DID_Resolve(did, false);
+    DID_Destroy(did);
+    if (!doc) {
+        deref(fc);
+        return NULL;
+    }
+
+    rc = DIDStore_StoreDID(fc->store, doc);
+    DIDDocument_Destroy(doc);
+    if (rc) {
+        deref(fc);
+        return NULL;
+    }
+
+    memset(&ela_cbs, 0, sizeof(ela_cbs));
+    ela_cbs.connection_status = on_conn;
+    ela_cbs.friend_connection = on_friend_conn;
+    ela_cbs.friend_message = on_msg;
+
 
     pthread_mutex_init(&fc->lock, NULL);
     pthread_cond_init(&fc->cond, NULL);
 
-    fc->carrier = ela_new(&opts->carrier_opts, &callbacks, fc);
+    fc->carrier = ela_new(&opts->carrier_opts, &ela_cbs, fc);
     if (!fc->carrier) {
         deref(fc);
         return NULL;
@@ -261,7 +422,7 @@ FeedsClient *feeds_client_create(FeedsCLIConfig *opts)
     return fc;
 }
 
-void feeds_client_wait_until_online(FeedsClient *fc)
+void feeds_client_wait_online(FeedsClient *fc)
 {
     pthread_mutex_lock(&fc->lock);
     while (!ela_is_ready(fc->carrier))
@@ -325,58 +486,170 @@ int feeds_client_friend_remove(FeedsClient *fc, const char *user_id)
     return ela_remove_friend(fc->carrier, user_id);
 }
 
-int transaction_start(FeedsClient *fc, const char *svc_addr, const void *req, size_t len,
-                      void **resp, ErrResp **err)
+static
+void sync_api_cb(void *resp, void *err, void *ctx)
 {
+    SyncAPI *api = ctx;
+
+    pthread_mutex_lock(&api->lock);
+    api->fin = true;
+    api->resp = resp;
+    api->err = err;
+    pthread_mutex_unlock(&api->lock);
+    pthread_cond_signal(&api->cond);
+}
+
+static
+void sync_api_init(SyncAPI *api)
+{
+    memset(api, 0, sizeof(*api));
+    pthread_mutex_init(&api->lock, NULL);
+    pthread_cond_init(&api->cond, NULL);
+}
+
+static
+void sync_api_deinit(SyncAPI *api)
+{
+    pthread_mutex_destroy(&api->lock);
+    pthread_cond_destroy(&api->cond);
+}
+
+static
+void wait_tsx_fin(SyncAPI *api)
+{
+    pthread_mutex_lock(&api->lock);
+    while (!api->fin)
+        pthread_cond_wait(&api->cond, &api->lock);
+    pthread_mutex_unlock(&api->lock);
+}
+
+int feeds_client_decl_owner(FeedsClient *fc, const char *addr, DeclOwnerResp **resp, ErrResp **err)
+{
+    SyncAPI me;
     int rc;
 
-    pthread_mutex_lock(&fc->lock);
+    sync_api_init(&me);
 
-    fc->waiting_response = true;
-    rc = ela_send_friend_message(fc->carrier, svc_addr, req, len, NULL);
+    rc = feeds_client_decl_owner_async(fc, addr, (void *)sync_api_cb, &me);
     if (rc < 0) {
-        fc->waiting_response = false;
-        pthread_mutex_unlock(&fc->lock);
+        sync_api_deinit(&me);
         return -1;
     }
 
-    while (!fc->resp && !fc->err)
-        pthread_cond_wait(&fc->cond, &fc->lock);
+    wait_tsx_fin(&me);
 
-    *resp = fc->resp;
-    *err = fc->err;
+    *resp = me.resp;
+    *err = me.err;
+    rc = me.resp || me.err ? 0 : -1;
 
-    fc->resp = NULL;
-    fc->err = NULL;
-    fc->unmarshal = NULL;
-    fc->waiting_response = false;
+    sync_api_deinit(&me);
 
-    pthread_mutex_unlock(&fc->lock);
-
-    return 0;
+    return rc;
 }
 
-int feeds_client_decl_owner(FeedsClient *fc, const char *svc_node_id, DeclOwnerResp **resp, ErrResp **err)
+static
+void tsx_dtor(void *obj)
+{
+
+}
+
+static
+Transaction *tsx_create(const Transaction *in)
+{
+    Transaction *tsx;
+
+    tsx = rc_zalloc(sizeof(*tsx) + strlen(in->addr) + 1, tsx_dtor);
+    if (!tsx)
+        return NULL;
+
+    tsx->le.data    = tsx;
+    tsx->addr       = strcpy(tsx->buf, in->addr);
+    tsx->tsx_id     = in->tsx_id;
+    tsx->marshalled = in->marshal(in->req);
+    tsx->unmarshal  = tsx->unmarshal;
+    tsx->resp_hdlr  = tsx->resp_hdlr;
+    tsx->user_cb    = tsx->user_cb;
+    tsx->user_data  = tsx->user_data;
+
+    if (!tsx->marshalled) {
+        deref(tsx);
+        return NULL;
+    }
+
+    return tsx;
+}
+
+static
+int tsx_start(FeedsClient *fc, const Transaction *in)
+{
+    Transaction *tsx = NULL;
+    int rc = 0;
+
+    tsx = tsx_create(in);
+    if (!tsx)
+        return -1;
+
+    pthread_mutex_lock(&fc->lock);
+    if (!ela_is_friend(fc->carrier, tsx->node_id) && !ela_is_ready(fc->carrier)) {
+        list_push_tail(fc->tsx.not_friend, &tsx->le);
+        goto finally;
+    } else if (!ela_is_friend(fc->carrier, tsx->node_id)) {
+        rc = ela_add_friend(fc->carrier, in->addr, "hello");
+        if (rc < 0)
+            goto finally;
+
+        list_push_tail(fc->tsx.peer_offline, &tsx->le);
+        goto finally;
+    } else {
+        ElaFriendInfo finfo;
+
+        rc = ela_get_friend_info(fc->carrier, tsx->node_id, &finfo);
+        if (rc < 0)
+            goto finally;
+
+        if (finfo.status != ElaConnectionStatus_Connected) {
+            list_push_tail(fc->tsx.peer_offline, &tsx->le);
+        } else {
+            rc = ela_send_friend_message(fc->carrier, tsx->node_id, tsx->marshalled->data,
+                                         tsx->marshalled->sz, NULL);
+            if (rc < 0)
+                goto finally;
+
+            list_push_tail(fc->tsx.ongoing, &tsx->le);
+        }
+    }
+
+finally:
+    pthread_mutex_unlock(&fc->lock);
+    deref(tsx);
+
+    return rc;
+}
+
+int feeds_client_decl_owner_async(FeedsClient *fc, const char *addr,
+                                  void (*cb)(DeclOwnerResp *, ErrResp *, void *),
+                                  void *ctx)
 {
     DeclOwnerReq req = {
         .method = "declare_owner",
-        .tsx_id = 1,
+        .tsx_id = random(),
         .params = {
             .nonce = "abc",
             .owner_did = fc->did
         }
     };
-    Marshalled *marshal;
-    int rc;
+    Transaction tsx = {
+        .addr      = addr,
+        .tsx_id    = req.tsx_id,
+        .req       = (Req *)&req,
+        .marshal   = rpc_marshal_decl_owner_req,
+        .unmarshal = rpc_unmarshal_decl_owner_resp,
+        .resp_hdlr = NULL,
+        .user_cb   = cb,
+        .user_data = ctx
+    };
 
-    marshal = rpc_marshal_decl_owner_req(&req);
-    if (!marshal)
-        return -1;
-
-    fc->unmarshal = rpc_unmarshal_decl_owner_resp;
-    rc = transaction_start(fc, svc_node_id, marshal->data, marshal->sz, (void **)resp, err);
-    deref(marshal);
-    return rc;
+    return tsx_start(fc, &tsx);
 }
 
 int feeds_client_imp_did(FeedsClient *fc, const char *svc_node_id, ImpDIDResp **resp, ErrResp **err)

@@ -32,6 +32,8 @@
 #include "../src/mkdirs.h"
 #include "cfg.h"
 
+TestConfig tc;
+
 const char *get_cfg_file(const char *config_file, const char *default_config_files[])
 {
     const char **file = config_file ? &config_file : default_config_files;
@@ -97,7 +99,7 @@ static void qualified_path(const char *path, const char *ref, char *qualified)
 
 #define DEFAULT_LOG_LEVEL ElaLogLevel_Info
 #define DEFAULT_DATA_DIR  "~/.ela-feeds-tests"
-TestConfig *load_cfg(const char *cfg_file, TestConfig *tc)
+TestConfig *load_cfg(const char *cfg_file)
 {
     config_setting_t *nodes_setting;
     config_setting_t *node_setting;
@@ -110,32 +112,32 @@ TestConfig *load_cfg(const char *cfg_file, TestConfig *tc)
     int rc;
     int i;
 
-    if (!cfg_file || !*cfg_file || !tc)
+    if (!cfg_file || !*cfg_file)
         return NULL;
 
-    memset(tc, 0, sizeof(*tc));
+    memset(&tc, 0, sizeof(tc));
 
-    config_init(&tc->cfg);
+    config_init(&tc.cfg);
 
-    rc = config_read_file(&tc->cfg, cfg_file);
+    rc = config_read_file(&tc.cfg, cfg_file);
     if (!rc) {
-        fprintf(stderr, "%s:%d - %s\n", config_error_file(&tc->cfg),
-                config_error_line(&tc->cfg), config_error_text(&tc->cfg));
-        free_cfg(tc);
+        fprintf(stderr, "%s:%d - %s\n", config_error_file(&tc.cfg),
+                config_error_line(&tc.cfg), config_error_text(&tc.cfg));
+        free_cfg();
         return NULL;
     }
 
-    nodes_setting = config_lookup(&tc->cfg, "carrier.bootstraps");
+    nodes_setting = config_lookup(&tc.cfg, "carrier.bootstraps");
     if (!nodes_setting) {
         fprintf(stderr, "Missing bootstraps section.\n");
-        free_cfg(tc);
+        free_cfg();
         return NULL;
     }
 
     entries = config_setting_length(nodes_setting);
     if (entries <= 0) {
         fprintf(stderr, "Empty bootstraps option.\n");
-        free_cfg(tc);
+        free_cfg();
         return NULL;
     }
 
@@ -143,16 +145,16 @@ TestConfig *load_cfg(const char *cfg_file, TestConfig *tc)
                               sizeof(BootstrapNode) * entries, bootstraps_dtor);
     if (!mem) {
         fprintf(stderr, "Load configuration failed, out of memory.\n");
-        free_cfg(tc);
+        free_cfg();
         return NULL;
     }
 
     *mem = entries;
-    tc->ela_opts.bootstraps_size = entries;
-    tc->ela_opts.bootstraps = (BootstrapNode *)(++mem);
+    tc.carrier.bootstraps_sz = entries;
+    tc.carrier.bootstraps = (BootstrapNode *)(++mem);
 
     for (i = 0; i < entries; i++) {
-        BootstrapNode *node = tc->ela_opts.bootstraps + i;
+        BootstrapNode *node = tc.carrier.bootstraps + i;
 
         node_setting = config_setting_get_elem(nodes_setting, i);
 
@@ -182,78 +184,67 @@ TestConfig *load_cfg(const char *cfg_file, TestConfig *tc)
             node->public_key = NULL;
     }
 
-    tc->ela_opts.udp_enabled = true;
-    rc = config_lookup_bool(&tc->cfg, "carrier.udp-enabled", &intopt);
+    tc.carrier.udp_enabled = true;
+    rc = config_lookup_bool(&tc.cfg, "carrier.udp-enabled", &intopt);
     if (rc)
-        tc->ela_opts.udp_enabled = !!intopt;
+        tc.carrier.udp_enabled = !!intopt;
 
-    rc = config_lookup_string(&tc->cfg, "data-dir", &stropt);
+    rc = config_lookup_string(&tc.cfg, "data-dir", &stropt);
     if (!rc || !*stropt)
         stropt = DEFAULT_DATA_DIR;
     qualified_path(stropt, cfg_file, path);
-    tc->data_dir = strdup(path);
-    if (!tc->data_dir || mkdirs(tc->data_dir, S_IRWXU) < 0) {
-        fprintf(stderr, "Making data dir[%s] failed.\n", tc->data_dir);
-        free_cfg(tc);
+    tc.data_dir = strdup(path);
+    if (!tc.data_dir || mkdirs(tc.data_dir, S_IRWXU) < 0) {
+        fprintf(stderr, "Making data dir[%s] failed.\n", tc.data_dir);
+        free_cfg();
         return NULL;
     }
 
-    tc->tests.log_lv = DEFAULT_LOG_LEVEL;
-    rc = config_lookup_int(&tc->cfg, "tests.log-level", &intopt);
+    tc.tests.log_lv = DEFAULT_LOG_LEVEL;
+    rc = config_lookup_int(&tc.cfg, "tests.log-level", &intopt);
     if (rc)
-        tc->tests.log_lv = intopt;
+        tc.tests.log_lv = intopt;
 
-    rc = config_lookup_string(&tc->cfg, "robot.host", &stropt);
-    if (!rc || !(tc->robot.host = *stropt ? strdup(stropt) : "localhost")) {
+    rc = config_lookup_string(&tc.cfg, "robot.host", &stropt);
+    if (!rc || !(tc.robot.host = *stropt ? strdup(stropt) : "localhost")) {
         fprintf(stderr, "Missing robot.host entry.\n");
-        free_cfg(tc);
+        free_cfg();
         return NULL;
     }
 
     intopt = 7238;
-    rc = config_lookup_int(&tc->cfg, "robot.port", &intopt);
+    rc = config_lookup_int(&tc.cfg, "robot.port", &intopt);
     if (!rc || (intopt <= 0 || intopt > 65535)) {
         fprintf(stderr, "Missing robot.port entry.\n");
-        free_cfg(tc);
+        free_cfg();
         return NULL;
     }
     sprintf(number, "%d", intopt);
-    tc->robot.port = strdup(number);
+    tc.robot.port = strdup(number);
 
-    tc->tests.log_lv = DEFAULT_LOG_LEVEL;
-    rc = config_lookup_int(&tc->cfg, "tests.log-level", &intopt);
+    tc.tests.log_lv = DEFAULT_LOG_LEVEL;
+    rc = config_lookup_int(&tc.cfg, "tests.log-level", &intopt);
     if (rc)
-        tc->robot.log_lv = intopt;
+        tc.robot.log_lv = intopt;
 
-    return tc;
+    return &tc;
 }
 
-void free_cfg(TestConfig *tc)
+void free_cfg()
 {
-    config_destroy(&tc->cfg);
+    config_destroy(&tc.cfg);
 
-    if (tc->ela_opts.persistent_location)
-        free((void *)tc->ela_opts.persistent_location);
+    if (tc.data_dir)
+        free(tc.data_dir);
 
-    if (tc->ela_opts.log_file)
-        free((void *)tc->ela_opts.log_file);
-
-    if (tc->ela_opts.bootstraps) {
-        size_t *p = (size_t *)tc->ela_opts.bootstraps;
+    if (tc.carrier.bootstraps) {
+        size_t *p = (size_t *)tc.carrier.bootstraps;
         deref(--p);
     }
 
-    if (tc->ela_opts.express_nodes) {
-        size_t *p = (size_t *)tc->ela_opts.express_nodes;
-        deref(--p);
-    }
+    if (tc.robot.host)
+        free(tc.robot.host);
 
-    if (tc->data_dir)
-        free(tc->data_dir);
-
-    if (tc->robot.host)
-        free(tc->robot.host);
-
-    if (tc->robot.port)
-        free(tc->robot.port);
+    if (tc.robot.port)
+        free(tc.robot.port);
 }

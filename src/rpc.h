@@ -11,15 +11,19 @@
 typedef char *AccessToken;
 
 typedef struct {
-    uint64_t tsx_id;
-    int64_t  ec;
-} ErrResp;
-
-typedef struct {
     char    *method;
     uint64_t tsx_id;
     char     params[0];
 } Req;
+
+typedef struct {
+    uint64_t tsx_id;
+} Resp;
+
+typedef struct {
+    uint64_t tsx_id;
+    int64_t  ec;
+} ErrResp;
 
 typedef struct {
     char    *method;

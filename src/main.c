@@ -275,13 +275,17 @@ void transport_deinit()
 static
 int transport_init(FeedsConfig *cfg)
 {
+    char addr[ELA_MAX_ADDRESS_LEN + 1];
     ElaCallbacks callbacks;
+    char fpath[PATH_MAX];
+    int fd;
+    int rc;
 
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.idle = idle_callback;
-    callbacks.friend_connection = friend_connection_callback;
+    callbacks.friend_connection = friend_conn_cb;
     callbacks.friend_request = friend_request_callback;
-    callbacks.friend_message = on_receiving_message;
+    callbacks.friend_message = on_msg;
 
     DIDBackend_InitializeDefault(resolver, cfg->didcache_dir);
 
@@ -291,7 +295,20 @@ int transport_init(FeedsConfig *cfg)
         goto failure;
     }
 
+    sprintf(fpath, "%s/address.txt", cfg->data_dir);
+    fd = open(fpath, O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        vlogE("Opening address file failed");
+        goto failure;
+    }
 
+    ela_get_address(carrier, addr, sizeof(addr));
+    rc = write(fd, addr, strlen(addr));
+    close(fd);
+    if (rc < 0) {
+        vlogE("Writing to address file failed");
+        goto failure;
+    }
 
     vlogI("Transport module initialized.");
 

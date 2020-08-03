@@ -30,23 +30,34 @@
 #include "../obj.h"
 #include "../c-vector/cvector.h"
 
+typedef struct {
+    const char *data_dir;
+    const char *log_file;
+    int log_lv;
+
+    struct {
+        size_t bootstraps_sz;
+        BootstrapNode *bootstraps;
+        bool udp_enabled;
+    } carrier;
+
+    struct {
+        const char *mnemo;
+        uint64_t idx;
+        const char *passphrase;
+        const char *passwd;
+    } did;
+} FeedsClientOpts;
+
 typedef struct FeedsClient FeedsClient;
 
-FeedsClient *feeds_client_create(FeedsCLIConfig *opts);
-
-void feeds_client_wait_until_online(FeedsClient *fc);
-
+FeedsClient *feeds_client_create(FeedsClientOpts *opts);
 void feeds_client_delete(FeedsClient *fc);
-
-ElaCarrier *feeds_client_get_carrier(FeedsClient *fc);
-
-int feeds_client_friend_add(FeedsClient *fc, const char *address, const char *hello);
-
-int feeds_client_wait_until_friend_connected(FeedsClient *fc, const char *friend_node_id);
-
-int feeds_client_friend_remove(FeedsClient *fc, const char *user_id);
-
-int feeds_client_decl_owner(FeedsClient *fc, const char *svc_node_id, DeclOwnerResp **resp, ErrResp **err);
+int feeds_client_run(FeedsClient *fc, int interval);
+int feeds_client_decl_owner(FeedsClient *fc, const char *addr, DeclOwnerResp **resp, ErrResp **err);
+int feeds_client_decl_owner_async(FeedsClient *fc, const char *addr,
+                                  void (*cb)(DeclOwnerResp *, ErrResp *, void *),
+                                  void *ctx);
 int feeds_client_imp_did(FeedsClient *fc, const char *svc_node_id, ImpDIDResp **resp, ErrResp **err);
 int feeds_client_iss_vc(FeedsClient *fc, const char *svc_node_id, const char *sub, IssVCResp **resp, ErrResp **err);
 int feeds_client_signin1(FeedsClient *fc, const char *svc_node_id, SigninReqChalResp **resp, ErrResp **err);

@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <pthread.h>
 
 #include <msgpack.h>
 #include <crystal.h>
@@ -20,7 +21,8 @@
 #define bin_sz     via.bin.size
 #define bool_val   via.boolean
 
-static msgpack_unpacked msgpack;
+static pthread_key_t key;
+static pthread_once_t init_done = PTHREAD_ONCE_INIT;
 
 static inline
 bool map_key_correct(const msgpack_object *map, size_t idx, const char *key)
@@ -1209,6 +1211,7 @@ int rpc_unmarshal_req(const void *rpc, size_t len, Req **req)
     const msgpack_object *version;
     const msgpack_object *method;
     const msgpack_object *tsx_id;
+    msgpack_unpacked msgpack;
     char method_str[1024];
     msgpack_object obj;
     int i;
@@ -1501,25 +1504,40 @@ static struct {
     {"new_subscription", unmarshal_new_sub_notif  }
 };
 
+static
+void thread_init(void)
+{
+    pthread_key_create(&key, free);
+}
+
 int rpc_unmarshal_notif_or_resp_id(const void *rpc, size_t len, Notif **notif, uint64_t *resp_id)
 {
     const msgpack_object *version;
     const msgpack_object *tsx_id;
     const msgpack_object *method;
+    msgpack_unpacked *msgpack;
     char method_str[1024];
     msgpack_object obj;
     int i;
 
-    msgpack_unpacked_init(&msgpack);
-    if (msgpack_unpack_next(&msgpack, rpc, len, NULL) != MSGPACK_UNPACK_SUCCESS) {
+    pthread_once(&init_done, thread_init);
+    if (!(msgpack = pthread_getspecific(key))) {
+        msgpack = malloc(sizeof(*msgpack));
+        if (!msgpack)
+            return -1;
+        pthread_setspecific(key, msgpack);
+    }
+
+    msgpack_unpacked_init(msgpack);
+    if (msgpack_unpack_next(msgpack, rpc, len, NULL) != MSGPACK_UNPACK_SUCCESS) {
         vlogE("Decoding msgpack failed.");
         return -1;
     }
 
-    obj = msgpack.data;
+    obj = msgpack->data;
     if (obj.type != MSGPACK_OBJECT_MAP) {
         vlogE("Not a msgpack map.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1532,7 +1550,7 @@ int rpc_unmarshal_notif_or_resp_id(const void *rpc, size_t len, Notif **notif, u
     if (!version || version->str_sz != strlen("1.0") ||
         memcmp(version->str_val, "1.0", version->str_sz) ||
         !!tsx_id + !!method != 1) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1548,24 +1566,25 @@ int rpc_unmarshal_notif_or_resp_id(const void *rpc, size_t len, Notif **notif, u
     for (i = 0; i < sizeof(notif_parsers) / sizeof(notif_parsers[0]); ++i) {
         if (!strcmp(method_str, notif_parsers[i].method)) {
             int rc = notif_parsers[i].parser(&obj, notif);
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             return rc;
         }
     }
 
     vlogE("Not a valid method.");
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return -1;
 }
 
 static
 int rpc_unmarshal_err_resp(ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *code;
     ErrResp *tmp;
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("error"), {
@@ -1589,6 +1608,7 @@ int rpc_unmarshal_err_resp(ErrResp **err)
 
 int rpc_unmarshal_decl_owner_resp(DeclOwnerResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *phase;
     const msgpack_object *did;
@@ -1597,11 +1617,11 @@ int rpc_unmarshal_decl_owner_resp(DeclOwnerResp **resp, ErrResp **err)
     void *buf;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1616,14 +1636,14 @@ int rpc_unmarshal_decl_owner_resp(DeclOwnerResp **resp, ErrResp **err)
                     (did && tsx_payload && tsx_payload->str_sz) :
                     (!did && !tsx_payload))) {
         vlogE("Invalid declare_owner response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(DeclOwnerResp) + str_reserve_spc(phase) +
                     str_reserve_spc(did) + str_reserve_spc(tsx_payload), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1640,12 +1660,13 @@ int rpc_unmarshal_decl_owner_resp(DeclOwnerResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_imp_did_resp(ImpDIDResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *did;
     const msgpack_object *tsx_payload;
@@ -1653,11 +1674,11 @@ int rpc_unmarshal_imp_did_resp(ImpDIDResp **resp, ErrResp **err)
     void *buf;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1668,14 +1689,14 @@ int rpc_unmarshal_imp_did_resp(ImpDIDResp **resp, ErrResp **err)
 
     if (!did || !tsx_payload || !tsx_payload->str_sz) {
         vlogE("Invalid import_did response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(ImpDIDResp) + str_reserve_spc(did) +
                     str_reserve_spc(tsx_payload), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1687,28 +1708,29 @@ int rpc_unmarshal_imp_did_resp(ImpDIDResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_iss_vc_resp(IssVCResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     IssVCResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
     });
 
     tmp = rc_zalloc(sizeof(IssVCResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1716,12 +1738,13 @@ int rpc_unmarshal_iss_vc_resp(IssVCResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_signin_req_chal_resp(SigninReqChalResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *vc_req;
     const msgpack_object *jws;
@@ -1730,11 +1753,11 @@ int rpc_unmarshal_signin_req_chal_resp(SigninReqChalResp **resp, ErrResp **err)
     void *buf;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1746,14 +1769,14 @@ int rpc_unmarshal_signin_req_chal_resp(SigninReqChalResp **resp, ErrResp **err)
 
     if (!vc_req || !jws || !jws->str_sz || (vc && !vc->str_sz)) {
         vlogE("Invalid sigin_request_challenge response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(SigninReqChalResp) + str_reserve_spc(jws) +
                     str_reserve_spc(vc), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1769,12 +1792,13 @@ int rpc_unmarshal_signin_req_chal_resp(SigninReqChalResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_signin_conf_chal_resp(SigninConfChalResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *tk;
     const msgpack_object *exp;
@@ -1782,11 +1806,11 @@ int rpc_unmarshal_signin_conf_chal_resp(SigninConfChalResp **resp, ErrResp **err
     void *buf;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1797,13 +1821,13 @@ int rpc_unmarshal_signin_conf_chal_resp(SigninConfChalResp **resp, ErrResp **err
 
     if (!tk || !tk->str_sz || !exp) {
         vlogE("Invalid signin_confirm_challenge response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(SigninConfChalResp) + str_reserve_spc(tk), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1814,22 +1838,23 @@ int rpc_unmarshal_signin_conf_chal_resp(SigninConfChalResp **resp, ErrResp **err
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_create_chan_resp(CreateChanResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *chan_id;
     CreateChanResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1839,13 +1864,13 @@ int rpc_unmarshal_create_chan_resp(CreateChanResp **resp, ErrResp **err)
 
     if (!chan_id) {
         vlogE("Invalid create_channel response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(CreateChanResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1854,22 +1879,23 @@ int rpc_unmarshal_create_chan_resp(CreateChanResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_pub_post_resp(PubPostResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *post_id;
     PubPostResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1879,13 +1905,13 @@ int rpc_unmarshal_pub_post_resp(PubPostResp **resp, ErrResp **err)
 
     if (!post_id) {
         vlogE("Invalid publish_post response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(PubPostResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1894,22 +1920,23 @@ int rpc_unmarshal_pub_post_resp(PubPostResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_post_cmt_resp(PostCmtResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *cmt_id;
     PostCmtResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -1919,13 +1946,13 @@ int rpc_unmarshal_post_cmt_resp(PostCmtResp **resp, ErrResp **err)
 
     if (!cmt_id) {
         vlogE("Invalid post_comment response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(PostCmtResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1934,22 +1961,23 @@ int rpc_unmarshal_post_cmt_resp(PostCmtResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_post_like_resp(PostLikeResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *result;
     PostLikeResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         result  = map_val_nil("result");
@@ -1957,13 +1985,13 @@ int rpc_unmarshal_post_like_resp(PostLikeResp **resp, ErrResp **err)
 
     if (!result) {
         vlogE("Invalid post_like response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(PostLikeResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -1971,22 +1999,23 @@ int rpc_unmarshal_post_like_resp(PostLikeResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_post_unlike_resp(PostUnlikeResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *result;
     PostUnlikeResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         result  = map_val_nil("result");
@@ -1994,13 +2023,13 @@ int rpc_unmarshal_post_unlike_resp(PostUnlikeResp **resp, ErrResp **err)
 
     if (!result) {
         vlogE("Invalid post_unlike response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(PostUnlikeResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2008,7 +2037,7 @@ int rpc_unmarshal_post_unlike_resp(PostUnlikeResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2025,6 +2054,7 @@ void get_my_chans_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_my_chans_resp(GetMyChansResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *is_last;
     const msgpack_object *chans;
@@ -2032,11 +2062,11 @@ int rpc_unmarshal_get_my_chans_resp(GetMyChansResp **resp, ErrResp **err)
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2047,13 +2077,13 @@ int rpc_unmarshal_get_my_chans_resp(GetMyChansResp **resp, ErrResp **err)
 
     if (!is_last || !chans) {
         vlogE("Invalid get_my_channels response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetMyChansResp), get_my_chans_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2080,7 +2110,7 @@ int rpc_unmarshal_get_my_chans_resp(GetMyChansResp **resp, ErrResp **err)
         if (!chan_id || !name || !name->str_sz || !intro || !intro->str_sz ||
             !subs || !avatar || !avatar->bin_sz) {
             vlogE("Invalid get_my_channels response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2088,7 +2118,7 @@ int rpc_unmarshal_get_my_chans_resp(GetMyChansResp **resp, ErrResp **err)
         ci = rc_zalloc(sizeof(ChanInfo) + str_reserve_spc(name) +
                        str_reserve_spc(intro) + avatar->bin_sz, NULL);
         if (!ci) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2108,7 +2138,7 @@ int rpc_unmarshal_get_my_chans_resp(GetMyChansResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2125,17 +2155,18 @@ void get_my_chans_meta_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_my_chans_meta_resp(GetMyChansMetaResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *result;
     GetMyChansMetaResp *tmp;
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         result  = map_val_arr("result");
@@ -2143,13 +2174,13 @@ int rpc_unmarshal_get_my_chans_meta_resp(GetMyChansMetaResp **resp, ErrResp **er
 
     if (!result) {
         vlogE("Invalid get_my_channels_metadata response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetMyChansMetaResp), get_my_chans_meta_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2167,14 +2198,14 @@ int rpc_unmarshal_get_my_chans_meta_resp(GetMyChansMetaResp **resp, ErrResp **er
 
         if (!chan_id || !subs) {
             vlogE("Invalid get_my_channels_metadata response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
 
         ci = rc_zalloc(sizeof(ChanInfo), NULL);
         if (!ci) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2187,7 +2218,7 @@ int rpc_unmarshal_get_my_chans_meta_resp(GetMyChansMetaResp **resp, ErrResp **er
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2211,6 +2242,7 @@ void get_chans_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_chans_resp(GetChansResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *is_last;
     const msgpack_object *chans;
@@ -2218,11 +2250,11 @@ int rpc_unmarshal_get_chans_resp(GetChansResp **resp, ErrResp **err)
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2233,13 +2265,13 @@ int rpc_unmarshal_get_chans_resp(GetChansResp **resp, ErrResp **err)
 
     if (!is_last || !chans) {
         vlogE("Invalid get_channels response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetChansResp), get_chans_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2273,7 +2305,7 @@ int rpc_unmarshal_get_chans_resp(GetChansResp **resp, ErrResp **err)
             !owner_name || !owner_name->str_sz || !owner_did || !owner_did->str_sz ||
             !subs || !upd_at || !avatar || !avatar->bin_sz) {
             vlogE("Invalid get_channels response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2282,7 +2314,7 @@ int rpc_unmarshal_get_chans_resp(GetChansResp **resp, ErrResp **err)
                        str_reserve_spc(intro) + str_reserve_spc(owner_name) +
                        str_reserve_spc(owner_did) + avatar->bin_sz, NULL);
         if (!ci) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2308,7 +2340,7 @@ int rpc_unmarshal_get_chans_resp(GetChansResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2319,6 +2351,7 @@ typedef struct {
 
 int rpc_unmarshal_get_chan_dtl_resp(GetChanDtlResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *chan_id;
     const msgpack_object *name;
@@ -2332,11 +2365,11 @@ int rpc_unmarshal_get_chan_dtl_resp(GetChanDtlResp **resp, ErrResp **err)
     void *buf;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2355,7 +2388,7 @@ int rpc_unmarshal_get_chan_dtl_resp(GetChanDtlResp **resp, ErrResp **err)
         !owner_name || !owner_name->str_sz || !owner_did || !owner_did->str_sz ||
         !subs || !upd_at || !avatar || !avatar->bin_sz) {
         vlogE("Invalid get_channel_detail response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2363,7 +2396,7 @@ int rpc_unmarshal_get_chan_dtl_resp(GetChanDtlResp **resp, ErrResp **err)
                     str_reserve_spc(intro) + str_reserve_spc(owner_name) +
                     str_reserve_spc(owner_did) + avatar->bin_sz, NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2387,7 +2420,7 @@ int rpc_unmarshal_get_chan_dtl_resp(GetChanDtlResp **resp, ErrResp **err)
 
     *resp = &tmp->resp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2406,6 +2439,7 @@ void get_sub_chans_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_sub_chans_resp(GetSubChansResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *is_last;
     const msgpack_object *chans;
@@ -2413,11 +2447,11 @@ int rpc_unmarshal_get_sub_chans_resp(GetSubChansResp **resp, ErrResp **err)
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2428,13 +2462,13 @@ int rpc_unmarshal_get_sub_chans_resp(GetSubChansResp **resp, ErrResp **err)
 
     if (!is_last || !chans) {
         vlogE("Invalid get_subscribed_channels response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetSubChansResp), get_sub_chans_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2468,7 +2502,7 @@ int rpc_unmarshal_get_sub_chans_resp(GetSubChansResp **resp, ErrResp **err)
             !owner_name || !owner_name->str_sz || !owner_did || !owner_did->str_sz ||
             !subs || !upd_at || !avatar || !avatar->bin_sz) {
             vlogE("Invalid get_subscribed_channels response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2477,7 +2511,7 @@ int rpc_unmarshal_get_sub_chans_resp(GetSubChansResp **resp, ErrResp **err)
                        str_reserve_spc(intro) + str_reserve_spc(owner_name) +
                        str_reserve_spc(owner_did) + avatar->bin_sz, NULL);
         if (!ci) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2503,7 +2537,7 @@ int rpc_unmarshal_get_sub_chans_resp(GetSubChansResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2520,6 +2554,7 @@ void get_posts_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_posts_resp(GetPostsResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *is_last;
     const msgpack_object *posts;
@@ -2527,11 +2562,11 @@ int rpc_unmarshal_get_posts_resp(GetPostsResp **resp, ErrResp **err)
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2542,13 +2577,13 @@ int rpc_unmarshal_get_posts_resp(GetPostsResp **resp, ErrResp **err)
 
     if (!is_last || !posts) {
         vlogE("Invalid get_posts response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetPostsResp), get_posts_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2578,14 +2613,14 @@ int rpc_unmarshal_get_posts_resp(GetPostsResp **resp, ErrResp **err)
             !post_id || !post_id_is_valid(post_id->u64_val) ||
             !content || !content->bin_sz || !cmts || !likes || !created_at) {
             vlogE("Invalid get_posts response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
 
         pi = rc_zalloc(sizeof(PostInfo) + content->bin_sz, NULL);
         if (!pi) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2604,7 +2639,7 @@ int rpc_unmarshal_get_posts_resp(GetPostsResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2621,6 +2656,7 @@ void get_liked_posts_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_liked_posts_resp(GetLikedPostsResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *is_last;
     const msgpack_object *posts;
@@ -2628,11 +2664,11 @@ int rpc_unmarshal_get_liked_posts_resp(GetLikedPostsResp **resp, ErrResp **err)
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2643,13 +2679,13 @@ int rpc_unmarshal_get_liked_posts_resp(GetLikedPostsResp **resp, ErrResp **err)
 
     if (!is_last || !posts) {
         vlogE("Invalid get_liked_posts response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetLikedPostsResp), get_liked_posts_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2679,14 +2715,14 @@ int rpc_unmarshal_get_liked_posts_resp(GetLikedPostsResp **resp, ErrResp **err)
             !post_id || !post_id_is_valid(post_id->u64_val) ||
             !content || !content->bin_sz || !cmts || !likes || !created_at) {
             vlogE("Invalid get_liked_posts response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
 
         pi = rc_zalloc(sizeof(PostInfo) + content->bin_sz, NULL);
         if (!pi) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2705,7 +2741,7 @@ int rpc_unmarshal_get_liked_posts_resp(GetLikedPostsResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
@@ -2722,6 +2758,7 @@ void get_cmts_resp_dtor(void *obj)
 
 int rpc_unmarshal_get_cmts_resp(GetCmtsResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *is_last;
     const msgpack_object *cmts;
@@ -2729,11 +2766,11 @@ int rpc_unmarshal_get_cmts_resp(GetCmtsResp **resp, ErrResp **err)
     int i;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2744,13 +2781,13 @@ int rpc_unmarshal_get_cmts_resp(GetCmtsResp **resp, ErrResp **err)
 
     if (!is_last || !cmts) {
         vlogE("Invalid get_comments response: invalid result.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetCmtsResp), get_cmts_resp_dtor);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2786,7 +2823,7 @@ int rpc_unmarshal_get_cmts_resp(GetCmtsResp **resp, ErrResp **err)
             !user_name || !user_name->str_sz ||
             !content || !content->bin_sz || !likes || !created_at) {
             vlogE("Invalid get_comments response: invalid result element.");
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2794,7 +2831,7 @@ int rpc_unmarshal_get_cmts_resp(GetCmtsResp **resp, ErrResp **err)
         ci = rc_zalloc(sizeof(CmtInfo) + str_reserve_spc(user_name) +
                        content->bin_sz, NULL);
         if (!ci) {
-            msgpack_unpacked_destroy(&msgpack);
+            msgpack_unpacked_destroy(msgpack);
             deref(tmp);
             return -1;
         }
@@ -2816,12 +2853,13 @@ int rpc_unmarshal_get_cmts_resp(GetCmtsResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_get_stats_resp(GetStatsResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *did;
     const msgpack_object *conn_cs;
@@ -2829,11 +2867,11 @@ int rpc_unmarshal_get_stats_resp(GetStatsResp **resp, ErrResp **err)
     void *buf;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         map_iter_kvs(map_val_map("result"), {
@@ -2844,13 +2882,13 @@ int rpc_unmarshal_get_stats_resp(GetStatsResp **resp, ErrResp **err)
 
     if (!did || !did->str_sz || !conn_cs) {
         vlogE("Invalid get_statistics response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(GetStatsResp) + str_reserve_spc(did), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2861,22 +2899,23 @@ int rpc_unmarshal_get_stats_resp(GetStatsResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_sub_chan_resp(SubChanResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *result;
     SubChanResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         result  = map_val_nil("result");
@@ -2884,13 +2923,13 @@ int rpc_unmarshal_sub_chan_resp(SubChanResp **resp, ErrResp **err)
 
     if (!result) {
         vlogE("Invalid subscribe_channel response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(SubChanResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2898,22 +2937,23 @@ int rpc_unmarshal_sub_chan_resp(SubChanResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_unsub_chan_resp(UnsubChanResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *result;
     UnsubChanResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         result  = map_val_nil("result");
@@ -2921,13 +2961,13 @@ int rpc_unmarshal_unsub_chan_resp(UnsubChanResp **resp, ErrResp **err)
 
     if (!result) {
         vlogE("Invalid unsubscribe_channel response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(UnsubChanResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2935,22 +2975,23 @@ int rpc_unmarshal_unsub_chan_resp(UnsubChanResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 
 int rpc_unmarshal_enbl_notif_resp(EnblNotifResp **resp, ErrResp **err)
 {
+    msgpack_unpacked *msgpack = pthread_getspecific(key);
     const msgpack_object *tsx_id;
     const msgpack_object *result;
     EnblNotifResp *tmp;
 
     if (!rpc_unmarshal_err_resp(err)) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return 0;
     }
 
-    map_iter_kvs(&msgpack.data, {
+    map_iter_kvs(&msgpack->data, {
         (void)map_val_str("version");
         tsx_id  = map_val_u64("id");
         result  = map_val_nil("result");
@@ -2958,13 +2999,13 @@ int rpc_unmarshal_enbl_notif_resp(EnblNotifResp **resp, ErrResp **err)
 
     if (!result) {
         vlogE("Invalid enable_notification response.");
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
     tmp = rc_zalloc(sizeof(EnblNotifResp), NULL);
     if (!tmp) {
-        msgpack_unpacked_destroy(&msgpack);
+        msgpack_unpacked_destroy(msgpack);
         return -1;
     }
 
@@ -2972,7 +3013,7 @@ int rpc_unmarshal_enbl_notif_resp(EnblNotifResp **resp, ErrResp **err)
 
     *resp = tmp;
 
-    msgpack_unpacked_destroy(&msgpack);
+    msgpack_unpacked_destroy(msgpack);
     return 0;
 }
 

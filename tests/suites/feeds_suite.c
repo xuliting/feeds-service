@@ -28,16 +28,22 @@
 #include <crystal.h>
 #include <cfg.h>
 
-#include "../case.h"
-#include "../../../src/jsonrpc.h"
-#include "../../../src/carrier_cfg.h"
+#include "case.h"
 #include "../../../src/feeds_client/feeds_client.h"
 
-static FeedsClient *publisher;
-static FeedsClient *subscriber;
+typedef struct {
+    FeedsClient *fc;
+    pthread_t tid;
+} TestsFeedsClient;
+
+static char data_dir[PATH_MAX];
+static TestsFeedsClient owner1;
+static TestsFeedsClient owner2;
+static TestsFeedsClient follower;
+static const char *mnemo = "advance duty suspect finish space matter squeeze elephant twenty over stick shield";
 static SOCKET msg_sock = INVALID_SOCKET;
-static char robot_address[ELA_MAX_ADDRESS_LEN + 1];
-static char robot_node_id[ELA_MAX_ID_LEN + 1];
+static char feedsd_addr[ELA_MAX_ADDRESS_LEN + 1];
+static char feedsd_node_id[ELA_MAX_ID_LEN + 1];
 static char *topic_name = "topic";
 static char topic_desc[ELA_MAX_APP_MESSAGE_LEN * 2 + 1];
 static char *non_existent_topic_name = "non-existant-topic";
@@ -48,7 +54,7 @@ void create_topic_without_permission(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_create_channel(subscriber, robot_node_id,
+    rc = feeds_client_create_channel(follower, feedsd_node_id,
                                      topic_name, topic_desc, &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of creating topic without permission");
@@ -63,7 +69,7 @@ void create_topic(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_create_channel(publisher, robot_node_id,
+    rc = feeds_client_create_channel(owner1, feedsd_node_id,
                                      topic_name, topic_desc, &resp);
     if (rc < 0)
         CU_FAIL("wrong result of creating topic");
@@ -78,7 +84,7 @@ void create_existing_topic(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_create_channel(publisher, robot_node_id,
+    rc = feeds_client_create_channel(owner1, feedsd_node_id,
                                      topic_name, topic_desc, &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of creating existing topic");
@@ -93,7 +99,7 @@ void post_event_without_permission(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_publish_post(subscriber, robot_node_id,
+    rc = feeds_client_publish_post(follower, feedsd_node_id,
                                    topic_name, "event1", &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of posting event without permission");
@@ -108,7 +114,7 @@ void post_event_on_non_existent_topic(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_publish_post(publisher, robot_node_id,
+    rc = feeds_client_publish_post(owner1, feedsd_node_id,
                                    non_existent_topic_name, "event1", &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of posting non-existent event");
@@ -123,7 +129,7 @@ void post_event_when_no_subscribers(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_publish_post(publisher, robot_node_id,
+    rc = feeds_client_publish_post(owner1, feedsd_node_id,
                                    topic_name, "event1", &resp);
     if (rc < 0) {
         CU_FAIL("wrong result of posting event when there is no subscribers");
@@ -132,7 +138,7 @@ void post_event_when_no_subscribers(void)
     cJSON_Delete(resp);
 
     sleep(2);
-    resp = feeds_client_get_new_posts(subscriber);
+    resp = feeds_client_get_new_posts(follower);
     if (resp)
         CU_FAIL("got new event(s) when there should not be");
 
@@ -147,7 +153,7 @@ void post_event_when_subscriber_exists(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_publish_post(publisher, robot_node_id,
+    rc = feeds_client_publish_post(owner1, feedsd_node_id,
                                    topic_name, "event2", &resp);
     if (rc < 0) {
         CU_FAIL("wrong result of posting event when only subscriber exists");
@@ -156,7 +162,7 @@ void post_event_when_subscriber_exists(void)
     cJSON_Delete(resp);
 
     sleep(2);
-    resp = feeds_client_get_new_posts(subscriber);
+    resp = feeds_client_get_new_posts(follower);
     if (resp)
         CU_FAIL("got new event(s) when there should not be");
 
@@ -173,7 +179,7 @@ void post_event_when_active_subscriber_exists(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_publish_post(publisher, robot_node_id,
+    rc = feeds_client_publish_post(owner1, feedsd_node_id,
                                    topic_name, "event3", &resp);
     if (rc < 0) {
         CU_FAIL("wrong result of posting event when there is an active subscriber");
@@ -182,7 +188,7 @@ void post_event_when_active_subscriber_exists(void)
     cJSON_Delete(resp);
 
     sleep(2);
-    resp = feeds_client_get_new_posts(subscriber);
+    resp = feeds_client_get_new_posts(follower);
     if (!resp || cJSON_GetArraySize(resp) != 1) {
         CU_FAIL("received incorrect number of new events");
         goto finally;
@@ -205,7 +211,7 @@ void list_owned_topics_when_no_topics(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_get_my_channels(publisher, robot_node_id, &resp);
+    rc = feeds_client_get_my_channels(owner1, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp))) {
         CU_FAIL("wrong result of listing owned topics when there is no topics");
         goto finally;
@@ -213,7 +219,7 @@ void list_owned_topics_when_no_topics(void)
     cJSON_Delete(resp);
 
 
-    rc = feeds_client_get_my_channels(subscriber, robot_node_id, &resp);
+    rc = feeds_client_get_my_channels(follower, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp)))
         CU_FAIL("wrong result of listing owned topics when there is no topics");
 
@@ -232,7 +238,7 @@ void list_owned_topics_when_topic_exists(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_get_my_channels(publisher, robot_node_id, &resp);
+    rc = feeds_client_get_my_channels(owner1, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(res = jsonrpc_get_result(resp)) != 1) {
         CU_FAIL("wrong result of listing owned topics");
         goto finally;
@@ -247,7 +253,7 @@ void list_owned_topics_when_topic_exists(void)
     }
     cJSON_Delete(resp);
 
-    rc = feeds_client_get_my_channels(subscriber, robot_node_id, &resp);
+    rc = feeds_client_get_my_channels(follower, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp)))
         CU_FAIL("wrong result of listing owned topics");
 
@@ -302,7 +308,7 @@ void list_owned_topics_batch_when_topic_exists(void)
         return;
     }
 
-    rc = transaction_start(publisher, robot_node_id, batch_str, strlen(batch_str) + 1,
+    rc = transaction_start(owner1, feedsd_node_id, batch_str, strlen(batch_str) + 1,
                            &resp, &type, &bi);
     free(batch_str);
     if (rc < 0) {
@@ -346,7 +352,7 @@ void subscribe_non_existent_topic(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_subscribe_channel(subscriber, robot_node_id, non_existent_topic_name, &resp);
+    rc = feeds_client_subscribe_channel(follower, feedsd_node_id, non_existent_topic_name, &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of subscribing non-existent topic");
 
@@ -360,7 +366,7 @@ void subscribe(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_subscribe_channel(subscriber, robot_node_id, topic_name, &resp);
+    rc = feeds_client_subscribe_channel(follower, feedsd_node_id, topic_name, &resp);
     if (rc < 0)
         CU_FAIL("wrong result of subscribing topic");
 
@@ -380,7 +386,7 @@ void unsubscribe_non_existent_topic(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_unsubscribe_channel(subscriber, robot_node_id, non_existent_topic_name, &resp);
+    rc = feeds_client_unsubscribe_channel(follower, feedsd_node_id, non_existent_topic_name, &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of unsubscribing non-existent topic");
 
@@ -394,7 +400,7 @@ void unsubscribe(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_unsubscribe_channel(subscriber, robot_node_id, topic_name, &resp);
+    rc = feeds_client_unsubscribe_channel(follower, feedsd_node_id, topic_name, &resp);
     if (rc < 0)
         CU_FAIL("wrong result of unsubscribing topic");
 
@@ -414,7 +420,7 @@ void explore_topics_when_no_topics(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_explore_topics(publisher, robot_node_id, &resp);
+    rc = feeds_client_explore_topics(owner1, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp))) {
         CU_FAIL("wrong result of exploring topics when there is no topic");
         goto finally;
@@ -422,7 +428,7 @@ void explore_topics_when_no_topics(void)
     cJSON_Delete(resp);
 
 
-    rc = feeds_client_explore_topics(subscriber, robot_node_id, &resp);
+    rc = feeds_client_explore_topics(follower, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp)))
         CU_FAIL("wrong result of exploring topics when there is no topic");
 
@@ -441,7 +447,7 @@ void explore_topics_when_topic_exists(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_explore_topics(publisher, robot_node_id, &resp);
+    rc = feeds_client_explore_topics(owner1, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(res = jsonrpc_get_result(resp)) != 1) {
         CU_FAIL("wrong result of exploring topics");
         goto finally;
@@ -456,7 +462,7 @@ void explore_topics_when_topic_exists(void)
     }
     cJSON_Delete(resp);
 
-    rc = feeds_client_explore_topics(subscriber, robot_node_id, &resp);
+    rc = feeds_client_explore_topics(follower, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(res = jsonrpc_get_result(resp)) != 1) {
         CU_FAIL("wrong result of exploring topics");
         goto finally;
@@ -479,7 +485,7 @@ void list_subscribed_topics_before_subscription(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_list_subscribed(publisher, robot_node_id, &resp);
+    rc = feeds_client_list_subscribed(owner1, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp))) {
         CU_FAIL("wrong result of listing subscribed topics");
         goto finally;
@@ -487,7 +493,7 @@ void list_subscribed_topics_before_subscription(void)
     cJSON_Delete(resp);
 
 
-    rc = feeds_client_list_subscribed(subscriber, robot_node_id, &resp);
+    rc = feeds_client_list_subscribed(follower, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp)))
         CU_FAIL("wrong result of listing subscribed topics");
 
@@ -506,14 +512,14 @@ void list_subscribed_topics_after_subscription(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_list_subscribed(publisher, robot_node_id, &resp);
+    rc = feeds_client_list_subscribed(owner1, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(jsonrpc_get_result(resp))) {
         CU_FAIL("wrong result of listing subscribed topics");
         goto finally;
     }
     cJSON_Delete(resp);
 
-    rc = feeds_client_list_subscribed(subscriber, robot_node_id, &resp);
+    rc = feeds_client_list_subscribed(follower, feedsd_node_id, &resp);
     if (rc < 0 || cJSON_GetArraySize(res = jsonrpc_get_result(resp)) != 1) {
         CU_FAIL("wrong result of listing subscribed topics");
         goto finally;
@@ -536,7 +542,7 @@ void fetch_unreceived_without_subscription(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_fetch_unreceived(subscriber, robot_node_id, topic_name, 1, &resp);
+    rc = feeds_client_fetch_unreceived(follower, feedsd_node_id, topic_name, 1, &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of fetching unreceived without subscription");
 
@@ -552,7 +558,7 @@ void fetch_unreceived(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_fetch_unreceived(subscriber, robot_node_id, topic_name, 1, &resp);
+    rc = feeds_client_fetch_unreceived(follower, feedsd_node_id, topic_name, 1, &resp);
     if (rc < 0 || cJSON_GetArraySize(res = jsonrpc_get_result(resp)) != 2)
         CU_FAIL("wrong result of fetching unreceived");
 
@@ -579,7 +585,7 @@ void fetch_unreceived_when_already_active(void)
     cJSON *resp;
     int rc;
 
-    rc = feeds_client_fetch_unreceived(subscriber, robot_node_id, topic_name, 1, &resp);
+    rc = feeds_client_fetch_unreceived(follower, feedsd_node_id, topic_name, 1, &resp);
     if (!rc || !resp)
         CU_FAIL("wrong result of fetching unreceived");
 
@@ -587,6 +593,16 @@ void fetch_unreceived_when_already_active(void)
         cJSON_Delete(resp);
 }
 
+static
+void decl_owner()
+{
+    DeclOwnerResp *resp;
+    ErrResp *err;
+
+    feeds_client_decl_owner(owner1.fc, feedsd_addr, &resp, &err);
+}
+
+DECL_TESTCASE(decl_owner)
 DECL_TESTCASE(create_topic_without_permission)
 DECL_TESTCASE(create_topic)
 DECL_TESTCASE(create_existing_topic)
@@ -653,83 +669,53 @@ CU_TestInfo* feeds_get_cases()
     return cases;
 }
 
-static
-void print_nothing(const char *format, va_list args)
+void *tfc_routine(void *arg)
 {
+    feeds_client_run((FeedsClient *)arg, 10);
+    return NULL;
 }
 
 static
-int publisher_init()
+void tfc_deinit(TestsFeedsClient *tfc)
 {
-    ElaOptions opts;
-    char arg_log_level[128];
-    char arg_data_dir[PATH_MAX];
-    char arg_log_file[PATH_MAX];
-    char *argv[] = {
-        "",
-        "--log-level",
-        arg_log_level,
-        "--data-dir",
-        arg_data_dir,
-        "--log-file",
-        arg_log_file
-    };
-    int argc = sizeof(argv) / sizeof(argv[0]);
 
-    sprintf(arg_log_level, "%d", test_config.tests.loglevel);
-    sprintf(arg_data_dir, "%s/publisher", test_config.persistent_location);
-    if (test_config.log2file)
-        sprintf(arg_log_file, "%s/publisher.log", arg_data_dir);
-    else
-        argc -= 2;
+}
+
+static
+int tfc_init(TestsFeedsClient *tfc, const char *role, uint64_t idx)
+{
+    FeedsClientOpts opts;
+    char path[PATH_MAX];
+    char log[PATH_MAX];
+    int rc;
+
+    sprintf(path, "%s/%s", data_dir, role);
+    sprintf(log, "%s/%s.log", data_dir, role);
 
     memset(&opts, 0, sizeof(opts));
-    carrier_config_copy(&opts, &test_config.ela_options);
-    carrier_config_update(&opts, argc, argv);
-    opts.log_printer = print_nothing;
+    opts.data_dir = path;
+    opts.log_file = log;
+    opts.log_lv = tc.tests.log_lv;
+    opts.carrier.bootstraps_sz = tc.carrier.bootstraps_sz;
+    opts.carrier.bootstraps = tc.carrier.bootstraps;
+    opts.carrier.udp_enabled = tc.carrier.udp_enabled;
+    opts.did.mnemo = mnemo;
+    opts.did.idx = idx;
+    opts.did.passphrase = "secret";
+    opts.did.passwd = "default";
 
-    publisher = feeds_client_create(&opts);
-    carrier_config_free(&opts);
+    tfc->fc = feeds_client_create(&opts);
+    if (!tfc->fc)
+        return -1;
 
-    return publisher ? 0 : -1;
+    rc = pthread_create(&tfc->tid, NULL, tfc_routine, tfc->fc);
+    if (rc < 0) {
+        tfc_deinit(tfc);
+        return -1;
+    }
+
+    return 0;
 }
-
-static
-int subscriber_init()
-{
-    ElaOptions opts;
-    char arg_log_level[128];
-    char arg_data_dir[PATH_MAX];
-    char arg_log_file[PATH_MAX];
-    char *argv[] = {
-        "",
-        "--log-level",
-        arg_log_level,
-        "--data-dir",
-        arg_data_dir,
-        "--log-file",
-        arg_log_file
-    };
-    int argc = sizeof(argv) / sizeof(argv[0]);
-
-    sprintf(arg_log_level, "%d", test_config.tests.loglevel);
-    sprintf(arg_data_dir, "%s/subscriber", test_config.persistent_location);
-    if (test_config.log2file)
-        sprintf(arg_log_file, "%s/subscriber.log", arg_data_dir);
-    else
-        argc -= 2;
-
-    memset(&opts, 0, sizeof(opts));
-    carrier_config_copy(&opts, &test_config.ela_options);
-    carrier_config_update(&opts, argc, argv);
-    opts.log_printer = print_nothing;
-
-    subscriber = feeds_client_create(&opts);
-    carrier_config_free(&opts);
-
-    return subscriber ? 0 : -1;
-}
-
 
 static
 int connect_robot(const char *host, const char *port)
@@ -769,48 +755,35 @@ void disconnect_robot()
 }
 
 static
-int notify_robot_of_publisher_node_id()
+int get_feedsd_addr()
 {
-    char node_id[ELA_MAX_ID_LEN + 1];
     int rc;
 
-    rc = connect_robot(test_config.robot.host, test_config.robot.port);
+    rc = connect_robot(tc.robot.host, tc.robot.port);
     if (rc < 0)
         return -1;
 
-    memset(node_id, 0, sizeof(node_id));
-    ela_get_nodeid(feeds_client_get_carrier(publisher), node_id, sizeof(node_id));
-
-    rc = send(msg_sock, node_id, strlen(node_id), 0);
-    if (rc != strlen(node_id)) {
+    rc = recv(msg_sock, feedsd_addr, sizeof(feedsd_addr) - 1, 0);
+    if (rc < 0 || !ela_address_is_valid(feedsd_addr)) {
         disconnect_robot();
         return -1;
     }
 
-    return 0;
-}
-
-static
-int get_robot_address()
-{
-    int rc;
-
-    rc = recv(msg_sock, robot_address, sizeof(robot_address) - 1, 0);
-    if (rc < 0 || !ela_address_is_valid(robot_address))
-        return -1;
-
-    ela_get_id_by_address(robot_address, robot_node_id, sizeof(robot_node_id));
+    ela_get_id_by_address(feedsd_addr, feedsd_node_id, sizeof(feedsd_node_id));
 
     return 0;
 }
 
 int feeds_suite_cleanup()
 {
-    if (publisher)
-        feeds_client_delete(publisher);
+    if (owner1)
+        feeds_client_delete(owner1);
 
-    if (subscriber)
-        feeds_client_delete(subscriber);
+    if (owner2)
+        feeds_client_delete(owner2);
+
+    if (follower)
+        feeds_client_delete(follower);
 
     disconnect_robot();
 
@@ -821,57 +794,31 @@ int feeds_suite_init()
 {
     int rc;
 
-    rc = publisher_init();
+    sprintf(data_dir, "%s/cases", tc.data_dir);
+
+    rc = tfc_init(&owner1, "owner1", 0);
     if (rc < 0)
         goto cleanup;
 
-    rc = subscriber_init();
+    rc = tfc_init(&owner2, "owner2", 1);
     if (rc < 0)
         goto cleanup;
 
-    fprintf(stderr, "waiting publisher online ...");
-    feeds_client_wait_until_online(publisher);
-    fprintf(stderr, "ok\n");
+    rc = tfc_init(&follower, "follower", 2);
+    if (rc < 0)
+        goto cleanup;
 
-    fprintf(stderr, "waiting subscriber online ...");
-    feeds_client_wait_until_online(subscriber);
-    fprintf(stderr, "ok\n");
-
-    fprintf(stderr, "notifying robot of publisher's node id ...");
+    fprintf(stderr, "Getting carrier address of feedsd ...");
     fflush(stderr);
-    rc = notify_robot_of_publisher_node_id();
+    rc = get_feedsd_addr();
     if (rc < 0)
         goto cleanup;
     fprintf(stderr, "ok\n");
-
-    fprintf(stderr, "getting carrier address of robot ...");
-    fflush(stderr);
-    rc = get_robot_address();
-    if (rc < 0)
-        goto cleanup;
-    fprintf(stderr, "ok\n");
-
-    fprintf(stderr, "waiting robot connected to publisher ...");
-    fflush(stderr);
-    rc = feeds_client_friend_add(publisher, robot_address, "hello");
-    if (rc < 0)
-        goto cleanup;
-    fprintf(stderr, "ok\n");
-
-    fprintf(stderr, "waiting robot connected to subscriber ...");
-    fflush(stderr);
-    rc = feeds_client_friend_add(subscriber, robot_address, "hello");
-    if (rc < 0)
-        goto cleanup;
-    fprintf(stderr, "ok\n");
-
-    memset(topic_desc, 'a', sizeof(topic_desc) - 1);
 
     return 0;
 
 cleanup:
     feeds_suite_cleanup();
-    CU_FAIL("test suite initialize error");
+    CU_FAIL("Test suite initialize error");
     return -1;
 }
-

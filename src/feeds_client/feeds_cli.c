@@ -1252,7 +1252,7 @@ int main(int argc, char *argv[])
         console("Error initializing feeds client");
         return -1;
     }
-    feeds_client_wait_until_online(fc);
+    feeds_client_wait_online(fc);
 
     do {
         state = STANDBY;

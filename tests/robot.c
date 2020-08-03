@@ -40,7 +40,6 @@ static char data_dir[PATH_MAX];
 static char feedsd_cfg_file[PATH_MAX];
 static SOCKET msg_sock = INVALID_SOCKET;
 static pid_t feedsd_pid;
-static TestConfig tc;
 
 int wait_cases_connecting(const char *host, const char *port)
 {
@@ -219,7 +218,7 @@ void cleanup()
     sprintf(path, "%s/feedsd.conf", data_dir);
     remove(path);
 
-    free_cfg(&tc);
+    free_cfg();
 }
 
 static
@@ -237,7 +236,7 @@ int robot_main(int argc, char *argv[])
     signal(SIGINT, sig_hdlr);
     signal(SIGTERM, sig_hdlr);
 
-    if (!load_cfg(cfg_file, &tc)) {
+    if (!load_cfg(cfg_file)) {
         fprintf(stderr, "Loading config failed!\n");
         return -1;
     }

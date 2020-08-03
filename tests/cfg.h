@@ -28,8 +28,14 @@
 
 typedef struct {
     config_t cfg;
-    ElaOptions ela_opts;
+
     char *data_dir;
+
+    struct {
+        size_t bootstraps_sz;
+        BootstrapNode *bootstraps;
+        bool udp_enabled;
+    } carrier;
 
     struct {
         int log_lv;
@@ -42,8 +48,9 @@ typedef struct {
     } robot;
 } TestConfig;
 
+extern TestConfig tc;
 const char *get_cfg_file(const char *config_file, const char *default_config_files[]);
-TestConfig *load_cfg(const char *cfg_file, TestConfig *tc);
-void free_cfg(TestConfig *tc);
+TestConfig *load_cfg(const char *cfg_file);
+void free_cfg();
 
 #endif // __CFG_H__

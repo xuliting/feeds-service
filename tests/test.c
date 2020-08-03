@@ -52,7 +52,7 @@ int test_main(int argc, char *argv[])
     }
 
     if (CU_initialize_registry() != CUE_SUCCESS) {
-        free_config();
+        free_cfg();
         return CU_get_error();
     }
 
@@ -62,7 +62,7 @@ int test_main(int argc, char *argv[])
                               suites[i].pInit,
                               suites[i].pClean);
         if (!pSuite) {
-            free_config();
+            free_cfg();
             CU_cleanup_registry();
             return CU_get_error();
         }
@@ -73,7 +73,7 @@ int test_main(int argc, char *argv[])
         for (j = 0; j < cases_cnt; j++) {
             if (CU_add_test(pSuite, ti[j].pName,
                             ti[j].pTestFunc) == NULL) {
-                free_config();
+                free_cfg();
                 CU_cleanup_registry();
                 return CU_get_error();
             }
@@ -88,7 +88,7 @@ int test_main(int argc, char *argv[])
     if (fail_cnt > 0)
         fprintf(stderr, "Failure Case: %d\n", fail_cnt);
 
-    free_config();
+    free_cfg();
     CU_cleanup_registry();
 
     return fail_cnt;

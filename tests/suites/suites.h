@@ -24,7 +24,7 @@
 #define __SUITES_H__
 
 #include "suite.h"
-#include "feeds_suite/feeds_suite.h"
+#include "feeds_suite.h"
 
 TestSuite suites[] = {
     DEFINE_FEEDS_TESTSUITE,

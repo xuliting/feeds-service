@@ -52,7 +52,15 @@ if(HAVE_SIGACTION_H)
 endif()
 
 set(SRC
-    )
+    main.c
+    launcher.c
+    test.c
+    robot.c
+    cfg.c
+    suites/feeds_suite.c
+    ../src/feeds_client/feeds_client.c
+        ../src/feeds_client/tsx.c
+    ../src/mkdirs.c)
 
 add_definitions(-DLIBCONFIG_STATIC)
 add_definitions(-DCRYSTAL_DYNAMIC)
@@ -73,6 +81,8 @@ set(LIBS
 
 include_directories(
     .
+    suites
+    ../src/feeds_client
     ${FEEDS_INT_DIST_DIR}/include)
 
 link_directories(
@@ -80,14 +90,7 @@ link_directories(
 
 add_executable(feeds_tests
     EXCLUDE_FROM_ALL
-    main.c
-    launcher.c
-    test.c
-    robot.c
-    cfg.c
-    suites/feeds_suite.c
-    ../src/feeds_client/feeds_client.c
-    ../src/mkdirs.c)
+    ${SRC})
 
 add_dependencies(feeds_tests ${DEPS})
 set_target_properties(feeds_tests PROPERTIES OUTPUT_NAME ela-feeds-tests)
